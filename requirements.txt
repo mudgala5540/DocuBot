@@ -2,12 +2,14 @@ streamlit
 PyMuPDF
 Pillow
 pytesseract
-opencv-python
+opencv-python-headless
 sentence-transformers
 faiss-cpu
 scikit-learn
 numpy
 google-generativeai
 python-dotenv
-asyncio
 aiofiles
+torch
+torchvision
+torchaudio
