@@ -1,0 +1,13 @@
+streamlit
+PyMuPDF
+Pillow
+pytesseract
+opencv-python
+sentence-transformers
+faiss-cpu
+scikit-learn
+numpy
+google-generativeai
+python-dotenv
+asyncio
+aiofiles
