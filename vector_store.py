@@ -8,6 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 import faiss
 from sklearn.metrics.pairwise import cosine_similarity
 
+# In vector_store.py
+
+# ... (keep all the imports at the top)
+
 class VectorStore:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         """Initialize vector store with sentence transformer model"""
@@ -19,14 +23,17 @@ class VectorStore:
         self.executor = ThreadPoolExecutor(max_workers=2)
         self._load_model()
     
+    # In your existing vector_store.py
+
     def _load_model(self):
         """Load the sentence transformer model"""
         try:
-            self.model = SentenceTransformer(self.model_name)
+            # FIX: Explicitly tell the model to use the CPU
+            self.model = SentenceTransformer(self.model_name, device='cpu') 
         except Exception as e:
             print(f"Error loading model {self.model_name}: {e}")
-            # Fallback to a smaller model
-            self.model = SentenceTransformer("all-MiniLM-L12-v2")
+            # FIX: Fallback model also needs the device specified
+            self.model = SentenceTransformer("all-MiniLM-L12-v2", device='cpu')
     
     async def add_documents(self, documents: List[Dict[str, Any]]):
         """Add documents to vector store"""

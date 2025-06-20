@@ -1,11 +1,18 @@
 # Environment variables
 .env
 
-# Python virtual environment
+# Python virtual environments
 venv/
 bot/
+botenv/
 
 # IDE and cache files
 __pycache__/
 .vscode/
 .idea/
+
+# Uploads and data cache
+uploads/
+cache/
+data/
+logs/

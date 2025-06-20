@@ -21,14 +21,14 @@ class LLMHandler:
         self.total_tokens_used = 0
         self.requests_made = 0
     
-    async def generate_response(self, query: str, relevant_chunks: List[Dict[str, Any]], max_tokens: int = 1000) -> str:
+    async def generate_response(self, query: str, relevant_chunks: List[Dict[str, Any]], max_tokens: int = 2000) -> str:
         """Generate response using relevant document chunks"""
         
         # Prepare context from relevant chunks
         context = self._prepare_context(relevant_chunks)
         
-        # Create optimized prompt
-        prompt = self._create_optimized_prompt(query, context)
+        # FIX: Call the new, more robust agentic prompt
+        prompt = self._create_agentic_prompt(query, context) 
         
         try:
             # Generate response
@@ -43,61 +43,94 @@ class LLMHandler:
             return f"Error generating response: {str(e)}"
     
     def _prepare_context(self, chunks: List[Dict[str, Any]]) -> str:
-        """Prepare context from document chunks"""
+        """Prepare context, prioritizing higher-scored chunks."""
         if not chunks:
             return "No relevant context found."
         
+        # IMPROVEMENT: Sort chunks by similarity score to use the best ones first
+        chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+
         context_parts = []
         total_length = 0
-        max_context_length = 4000  # Leave room for prompt and response
-        
-        for i, chunk in enumerate(chunks):
-            chunk_text = f"[Document {i+1}, Page {chunk.get('page', 'N/A')}]\n{chunk['text']}\n"
-            
+        max_context_length = 8000 # Give the model ample context
+
+        for chunk in chunks:
+            # IMPROVEMENT: Simpler format for the LLM
+            chunk_text = f"--- Context from Page {chunk.get('page', 'N/A')} ---\n{chunk['text']}\n"
             if total_length + len(chunk_text) > max_context_length:
                 break
-            
             context_parts.append(chunk_text)
             total_length += len(chunk_text)
         
         return "\n".join(context_parts)
     
-    def _create_optimized_prompt(self, query: str, context: str) -> str:
-        """Create an optimized prompt for better responses"""
-        
-        prompt = f"""You are an intelligent document analysis assistant. Your task is to provide accurate, helpful answers based on the provided document context.
 
-CONTEXT FROM DOCUMENTS:
+    def _create_agentic_prompt(self, query: str, context: str) -> str:
+        """
+        Creates a resilient, multi-layered prompt that instructs the AI to first
+        classify the user's intent before answering. This is the core of the agent's robustness.
+        """
+        prompt = f"""You are a professional, highly intelligent document analysis assistant. Your persona is helpful, concise, and strictly factual.
+
+Your task is to follow a sequence of rules to respond to the user's query.
+
+**--- Rules of Operation ---**
+
+**Rule 1: Analyze the User's Query Intent.**
+First, categorize the user's query into one of three types:
+  a. **Chit-Chat:** Is it a simple greeting, pleasantry, or conversational filler? (e.g., "hi", "how are you?", "thanks", "who are you?")
+  b. **Nonsense/Irrelevant:** Is it gibberish, a random string of characters, or a topic completely unrelated to business documents? (e.g., "asdfasdf", "what is the color of the sky?", "tell me a joke")
+  c. **Document-Related Query:** Is it a specific question that could plausibly be answered by the provided document context?
+
+**Rule 2: Formulate Your Response Based on Intent.**
+
+*   **If the intent is Chit-Chat:**
+    - Respond politely and briefly as an AI assistant.
+    - DO NOT use the document context.
+    - DO NOT mention the documents.
+    - Example: If user says "thank you", you say "You're welcome! How else can I help?"
+
+*   **If the intent is Nonsense/Irrelevant:**
+    - State clearly and politely that your function is to answer questions about the uploaded documents.
+    - DO NOT attempt to answer the irrelevant question.
+    - Example: "I can only answer questions related to the documents you've provided. Please ask a question about their content."
+
+*   **If the intent is a Document-Related Query:**
+    - Scrutinize the provided "DOCUMENT CONTEXT" below to find the answer.
+    - **Your answer MUST be derived 100% from this context.** Do not use any outside knowledge.
+    - If the context contains the answer, provide it clearly and concisely. Use bullet points for lists or steps.
+    - **If the context DOES NOT contain the answer, you MUST state: "Based on the provided documents, I could not find an answer to that question."** Do not guess or hallucinate.
+    - **CRITICAL:** After your answer, you MUST add a source citation on a new line, listing the exact page numbers you used. The format must be: `(Source: Page X, Page Y)`
+
+**--- Execution ---**
+
+**DOCUMENT CONTEXT( context from documents ):** 
 {context}
 
-USER QUESTION: {query}
+**USER QUESTION:**
+{query}
 
-INSTRUCTIONS:
-1. Answer based ONLY on the provided context
-2. If information is not in the context, clearly state this
-3. Provide specific references to page numbers when available
-4. Be concise but comprehensive
-5. Use bullet points or numbered lists when appropriate
-6. If the question asks for images or visual content, mention what images might be relevant based on the text context
-
-RESPONSE:"""
-
+**ASSISTANT RESPONSE (Follow the rules above):**
+"""
         return prompt
-    
+
+
+
     async def _generate_with_retry(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
         """Generate response with retry logic"""
         
         for attempt in range(max_retries):
             try:
-                # Configure generation parameters for cost-effectiveness
+                # IMPROVEMENT: Set temperature to 0.0 for maximum factuality
                 generation_config = genai.types.GenerationConfig(
                     max_output_tokens=max_tokens,
-                    temperature=0.1,  # Lower temperature for more consistent responses
-                    top_p=0.8,
+                    temperature=0.0,
+                    top_p=0.95,
                     top_k=40
                 )
                 
-                response = self.model.generate_content(
+                # IMPROVEMENT: Use the asynchronous version of the call for better performance
+                response = await self.model.generate_content_async(
                     prompt,
                     generation_config=generation_config
                 )
@@ -105,10 +138,9 @@ RESPONSE:"""
                 return response.text
                 
             except Exception as e:
+                print(f"LLM generation failed on attempt {attempt + 1}: {e}")
                 if attempt == max_retries - 1:
                     raise e
-                
-                # Wait before retry
                 await asyncio.sleep(2 ** attempt)
         
         return "Failed to generate response after multiple attempts."
