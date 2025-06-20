@@ -11,10 +11,11 @@ import zipfile
 import io
 from dotenv import load_dotenv
 import re
-import nest_asyncio 
+import nest_asyncio
 
-nest_asyncio.apply() 
-
+# Apply the patch to allow nested asyncio event loops
+nest_asyncio.apply()
+# --- FIX: Load environment variables at the very top ---
 load_dotenv()
 
 # Page config
@@ -95,7 +96,8 @@ class PDFAgent:
                 for img_data in images:
                     ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
                     if ocr_text.strip():
-                        img_data['ocr_text'] = ocr_text
+                        # FIX: Store OCR text in lowercase for easier, case-insensitive searching later
+                        img_data['ocr_text'] = ocr_text.lower()
 
                 all_chunks.extend(text_chunks)
                 all_images.extend(images)
@@ -114,12 +116,55 @@ class PDFAgent:
 
         return all_chunks, all_images
 
-    async def query_documents(self, query, top_k=5):
+    async def query_documents(self, query, top_k=8):
         relevant_chunks = await self.vector_store.similarity_search(query, k=top_k)
         response = await self.llm_handler.generate_response(query, relevant_chunks)
-        return response, relevant_chunks
+        return response
 
+def parse_source_pages(response_text: str) -> list[int]:
+    """Parses page numbers from the AI's source citation, e.g., '(Source: Page 10, Page 201)'."""
+    match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
+    return [int(p) for p in re.findall(r'\d+', match.group(1))] if match else []
 
+def find_relevant_images(cited_pages: list, all_images: list) -> list:
+    """
+    Finds ALL images that appear on the specific page numbers cited by the LLM.
+    This is the strictest and most accurate method for ensuring relevance.
+    """
+    # If the LLM didn't cite any pages, there are no relevant images.
+    if not cited_pages:
+        return []
+    
+    # Filter the entire list of images to find every one that is on a cited page.
+    found_images = [
+        img for img in all_images if img['page'] in cited_pages
+    ]
+    
+    # Sort the found images by page number and their original index to maintain document order.
+    found_images.sort(key=lambda x: (x['page'], x['index']))
+
+    return found_images # Return the complete list of all relevant images.
+
+'''
+def find_relevant_images(cited_pages: list, query: str, all_images: list) -> list:
+    """Finds the most relevant images using a hybrid page and OCR search."""
+    if not cited_pages and not query: return []
+    query_words = set(query.lower().split()) - {'the', 'a', 'is', 'to', 'in', 'of', 'and', 'how', 'what'}
+    
+    relevant_images = {}
+    for img in all_images:
+        identifier = (img['page'], img['index'])
+        score = 0
+        if img['page'] in cited_pages:
+            score += 10
+        if 'ocr_text' in img and any(word in img['ocr_text'] for word in query_words):
+            score += 5
+        if score > 0:
+            relevant_images[identifier] = {'image_data': img, 'score': score}
+    
+    sorted_images = sorted(relevant_images.values(), key=lambda x: x['score'], reverse=True)
+    return [item['image_data'] for item in sorted_images[:6]]
+'''
 def main():
     st.markdown('<div class="main-header"><h1>🤖 PDF Intelligence Agent</h1><p>Advanced AI-powered document analysis</p></div>', unsafe_allow_html=True)
 
@@ -204,73 +249,49 @@ def main():
     if st.session_state.processed_docs:
         st.subheader("💬 Chat with Your Documents")
 
-        # Chat history display
+        # Display chat history from session state
         for message in st.session_state.chat_history:
-            role = message['role']
-            if role == 'user':
-                with st.chat_message("user"):
-                    st.write(message["content"])
-            else:
-                with st.chat_message("assistant"):
-                    st.write(message["content"])
-                    # --- NEW: Display relevant images if they exist in the message ---
-                    if "images" in message and message["images"]:
-                        st.markdown("---")
-                        st.markdown("**Relevant Images:**")
-                        cols = st.columns(3)
-                        for i, img_data in enumerate(message["images"]):
-                            with cols[i % 3]:
-                                # --- FIX: use_container_width ---
-                                st.image(img_data['image'], caption=f"Page {img_data['page']}", use_container_width=True)
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if message.get("images"):
+                    st.write("---")
+                    st.markdown("**Relevant Images:**")
+                    cols = st.columns(3)
+                    for i, img_data in enumerate(message["images"]):
+                        with cols[i % 3]:
+                            st.image(img_data['image'], caption=f"Page {img_data['page']}", use_container_width=True)
 
-
-        # Query input
-        query = st.chat_input("Ask anything about your documents...")
-
-        if query:
+        # Handle user input
+        if query := st.chat_input("Ask anything about your documents..."):
             st.session_state.chat_history.append({"role": "user", "content": query})
 
-            # --- NEW: Handle Chit-Chat vs. Document Queries ---
-            normalized_query = query.lower().strip()
-            chit_chat_keywords = ["hi", "hello", "how are you", "thanks", "thank you"]
+            with st.spinner("Thinking..."):
+                # 1. Get the raw response from the LLM. This now correctly expects one value.
+                response_text = asyncio.run(
+                    st.session_state.agent.query_documents(query)
+                )
+                
+                # 2. Check if the response is a valid answer or a refusal/chitchat
+                no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome", "hello!"]
+                is_valid_answer = not any(phrase in response_text.lower() for phrase in no_answer_phrases)
+                
+                images_to_display = []
+                # 3. ONLY search for images if it was a valid, document-related answer
+                if is_valid_answer:
+                    cited_pages = parse_source_pages(response_text)
+                    # You have two find_relevant_images functions, ensure you are using the correct one.
+                    # This one is stricter and better.
+                    images_to_display = find_relevant_images(cited_pages, st.session_state.extracted_images)
 
-            if normalized_query in chit_chat_keywords:
-                response = "Hello! I'm here to help you with your documents. What would you like to know?"
-                if "how are you" in normalized_query:
-                    response = "I'm doing well, thank you for asking! How can I assist you with the provided documents?"
-                if "thank" in normalized_query:
-                    response = "You're welcome! Is there anything else I can help with?"
+                # 4. Add the complete message bundle to session state for the next rerun
+                st.session_state.chat_history.append({
+                    "role": "assistant", 
+                    "content": response_text,
+                    "images": images_to_display
+                })
 
-                st.session_state.chat_history.append({"role": "assistant", "content": response, "images": []})
-
-            else: # --- This is a document query ---
-                with st.spinner("Thinking..."):
-                    response, relevant_chunks = asyncio.run(
-                        st.session_state.agent.query_documents(query)
-                    )
-
-                    # --- NEW: Find relevant images based on the chunks used for the answer ---
-                    relevant_images = []
-                    if relevant_chunks:
-                        relevant_pages = set(chunk['page'] for chunk in relevant_chunks)
-                        all_doc_images = st.session_state.extracted_images
-                        
-                        # Find unique images from the relevant pages
-                        seen_images = set()
-                        for img in all_doc_images:
-                            if img['page'] in relevant_pages:
-                                identifier = (img['page'], img['index'])
-                                if identifier not in seen_images:
-                                    relevant_images.append(img)
-                                    seen_images.add(identifier)
-
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": response,
-                        "images": relevant_images
-                    })
-            
-            st.rerun() # <-- FIX: Use st.rerun()
+            # 5. Rerun the script to display the new messages in the history
+            st.rerun()
 
     else:
         st.info("👋 Welcome! Please upload your PDF documents in the sidebar to get started.")
@@ -278,6 +299,6 @@ def main():
 
 if __name__ == "__main__":
     if not os.getenv('GOOGLE_API_KEY'):
-        st.error("❌ Please set GOOGLE_API_KEY in your .env file")
+        st.error("❌ Please set GOOGLE_API_KEY in your .env file or Streamlit secrets")
         st.stop()
     main()
