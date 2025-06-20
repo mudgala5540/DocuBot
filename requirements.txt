@@ -10,7 +10,7 @@ numpy
 google-generativeai
 python-dotenv
 aiofiles
-
+nest_asyncio
 # Let pip install the latest compatible CPU-only versions of PyTorch libraries
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch

@@ -113,7 +113,7 @@ class PDFProcessor:
                     pix = fitz.Pixmap(doc, xref)
                     
                     # Skip if image is too small (likely decorative)
-                    if pix.width < 50 or pix.height < 50:
+                    if pix.width < 100 or pix.height < 100:
                         pix = None
                         continue
                     

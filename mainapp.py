@@ -11,8 +11,10 @@ import zipfile
 import io
 from dotenv import load_dotenv
 import re
+import nest_asyncio 
 
-# --- FIX: Load environment variables at the very top ---
+nest_asyncio.apply() 
+
 load_dotenv()
 
 # Page config

@@ -123,6 +123,26 @@ def parse_source_pages(response_text: str) -> list[int]:
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     return [int(p) for p in re.findall(r'\d+', match.group(1))] if match else []
 
+def find_relevant_images(cited_pages: list, all_images: list) -> list:
+    """
+    Finds ALL images that appear on the specific page numbers cited by the LLM.
+    This is the strictest and most accurate method for ensuring relevance.
+    """
+    # If the LLM didn't cite any pages, there are no relevant images.
+    if not cited_pages:
+        return []
+    
+    # Filter the entire list of images to find every one that is on a cited page.
+    found_images = [
+        img for img in all_images if img['page'] in cited_pages
+    ]
+    
+    # Sort the found images by page number and their original index to maintain document order.
+    found_images.sort(key=lambda x: (x['page'], x['index']))
+
+    return found_images # Return the complete list of all relevant images.
+
+'''
 def find_relevant_images(cited_pages: list, query: str, all_images: list) -> list:
     """Finds the most relevant images using a hybrid page and OCR search."""
     if not cited_pages and not query: return []
@@ -141,7 +161,7 @@ def find_relevant_images(cited_pages: list, query: str, all_images: list) -> lis
     
     sorted_images = sorted(relevant_images.values(), key=lambda x: x['score'], reverse=True)
     return [item['image_data'] for item in sorted_images[:6]]
-
+'''
 def main():
     st.markdown('<div class="main-header"><h1>🤖 PDF Intelligence Agent</h1><p>Advanced AI-powered document analysis</p></div>', unsafe_allow_html=True)
 
@@ -244,15 +264,15 @@ def main():
 
             with st.spinner("Thinking..."):
                 # The new prompt handles all edge cases, so we just call the agent
-                response_text = asyncio.run(
+                response_text, _ = asyncio.run(
                     st.session_state.agent.query_documents(query)
                 )
                 
                 # After getting the answer, parse the pages the AI *actually* used for its response
                 cited_pages = parse_source_pages(response_text)
                 
-                # Now, find the best images based on those cited pages and the query's OCR text
-                relevant_images = find_relevant_images(cited_pages, query, st.session_state.extracted_images)
+                # Now, find all relevant images based on those cited pages.
+                relevant_images = find_relevant_images(cited_pages, st.session_state.extracted_images)
                 
                 # Don't show images if the AI said it couldn't find an answer or was just chatting
                 no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome"]
