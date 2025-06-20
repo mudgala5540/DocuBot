@@ -11,7 +11,10 @@ import zipfile
 import io
 from dotenv import load_dotenv
 import re
+import nest_asyncio
 
+# Apply the patch to allow nested asyncio event loops
+nest_asyncio.apply()
 # --- FIX: Load environment variables at the very top ---
 load_dotenv()
 
@@ -263,32 +266,31 @@ def main():
             st.session_state.chat_history.append({"role": "user", "content": query})
 
             with st.spinner("Thinking..."):
-                # The new prompt handles all edge cases, so we just call the agent
-                response_text, _ = asyncio.run(
+                # 1. Get the raw response from the LLM. This now correctly expects one value.
+                response_text = asyncio.run(
                     st.session_state.agent.query_documents(query)
                 )
                 
-                # After getting the answer, parse the pages the AI *actually* used for its response
-                cited_pages = parse_source_pages(response_text)
+                # 2. Check if the response is a valid answer or a refusal/chitchat
+                no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome", "hello!"]
+                is_valid_answer = not any(phrase in response_text.lower() for phrase in no_answer_phrases)
                 
-                # Now, find all relevant images based on those cited pages.
-                relevant_images = find_relevant_images(cited_pages, st.session_state.extracted_images)
-                
-                # Don't show images if the AI said it couldn't find an answer or was just chatting
-                no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome"]
-                if any(phrase in response_text.lower() for phrase in no_answer_phrases):
-                    images_to_display = []
-                else:
-                    images_to_display = relevant_images
-                
-                # Add the complete response to chat history
+                images_to_display = []
+                # 3. ONLY search for images if it was a valid, document-related answer
+                if is_valid_answer:
+                    cited_pages = parse_source_pages(response_text)
+                    # You have two find_relevant_images functions, ensure you are using the correct one.
+                    # This one is stricter and better.
+                    images_to_display = find_relevant_images(cited_pages, st.session_state.extracted_images)
+
+                # 4. Add the complete message bundle to session state for the next rerun
                 st.session_state.chat_history.append({
                     "role": "assistant", 
                     "content": response_text,
                     "images": images_to_display
                 })
-            
-            # Use st.rerun() to update the display with the new message
+
+            # 5. Rerun the script to display the new messages in the history
             st.rerun()
 
     else:

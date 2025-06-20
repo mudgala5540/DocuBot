@@ -98,45 +98,40 @@ class PDFProcessor:
         return await loop.run_in_executor(self.executor, self._extract_images_sync, pdf_path)
     
     def _extract_images_sync(self, pdf_path: str) -> List[Dict[str, Any]]:
-        """Synchronous image extraction"""
+        """Synchronous image extraction with improved filtering for real images."""
         doc = fitz.open(pdf_path)
         images = []
         
         for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            image_list = page.get_images()
-            
-            for img_index, img in enumerate(image_list):
+            for img_info in doc.get_page_images(page_num):
                 try:
-                    # Get image data
-                    xref = img[0]
-                    pix = fitz.Pixmap(doc, xref)
+                    xref = img_info[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
                     
-                    # Skip if image is too small (likely decorative)
-                    if pix.width < 100 or pix.height < 100:
-                        pix = None
+                    # --- THE DEFINITIVE FIX ---
+                    # Check if it's a real pixel-based image by looking at its colorspace
+                    # This filters out vector graphics, masks, and other non-image objects
+                    if not base_image.get("colorspace"):
                         continue
+
+                    # Also check image dimensions from the metadata
+                    if base_image["width"] < 100 or base_image["height"] < 100:
+                        continue
+
+                    img_pil = Image.open(io.BytesIO(image_bytes))
                     
-                    # Convert to PIL Image
-                    if pix.n - pix.alpha < 4:  # GRAY or RGB
-                        img_data = pix.tobytes("png")
-                        img_pil = Image.open(io.BytesIO(img_data))
-                        
-                        image_info = {
-                            'image': img_pil,
-                            'page': page_num + 1,
-                            'index': img_index,
-                            'width': pix.width,
-                            'height': pix.height,
-                            'size': len(img_data),
-                            'format': 'PNG'
-                        }
-                        images.append(image_info)
-                    
-                    pix = None
+                    image_data = {
+                        'image': img_pil,
+                        'page': page_num + 1,
+                        'index': xref,  # Use xref as a unique index for the page
+                        'width': base_image["width"],
+                        'height': base_image["height"],
+                    }
+                    images.append(image_data)
                     
                 except Exception as e:
-                    print(f"Error extracting image {img_index} from page {page_num + 1}: {e}")
+                    print(f"Skipping problematic image on page {page_num + 1}: {e}")
                     continue
         
         doc.close()
