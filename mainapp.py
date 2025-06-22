@@ -10,14 +10,13 @@ from llm_handler import LLMHandler
 from image_processor import ImageProcessor
 import nest_asyncio
 
-# Apply the patch to allow nested asyncio event loops.
-# This is CRUCIAL for Streamlit's execution model and for the fix below.
+# Apply the patch to allow nested asyncio event loops. This MUST be at the top.
 nest_asyncio.apply()
 
 # Load environment variables from .env file
 load_dotenv()
 
-# --- Page Config (WORLD-CLASS UI START) ---
+# --- Page Config (UI Enhancements) ---
 st.set_page_config(
     page_title="Document Intelligence Agent",
     page_icon="🤖",
@@ -26,18 +25,16 @@ st.set_page_config(
 )
 
 # --- THE DEFINITIVE FIX for the "Task attached to a different loop" Error ---
+# This helper function ensures we are always using the same, valid event loop
+# across all Streamlit reruns. This is the key to stability.
 def run_async(coro):
     """
-    Runs an asyncio coroutine, ensuring it uses the same event loop
-    managed by nest_asyncio across Streamlit reruns. This avoids the
-    error with stateful clients like the one used by google-generativeai.
+    Runs an asyncio coroutine in a way that is compatible with Streamlit's
+    rerun-based execution model.
     """
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
+    # Get the current running event loop. If there is none, it creates one.
+    # nest_asyncio ensures that we can "run" a loop that is already running.
+    loop = asyncio.get_event_loop()
     return loop.run_until_complete(coro)
 
 
@@ -61,18 +58,14 @@ class PDFAgent:
                     tmp_path = tmp_file.name
                 
                 try:
-                    # Extract text and images
                     st.write("📄 Extracting text chunks...")
                     text_chunks = await self.pdf_processor.extract_text_chunks(tmp_path)
                     st.write("🖼️ Extracting images...")
                     images = await self.pdf_processor.extract_images(tmp_path)
-                    
-                    # Perform OCR on extracted images
                     st.write("🔍 Performing OCR on images...")
                     for img_data in images:
                         ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
-                        if ocr_text:
-                            img_data['ocr_text'] = ocr_text.lower()
+                        if ocr_text: img_data['ocr_text'] = ocr_text.lower()
                     
                     all_chunks.extend(text_chunks)
                     all_images.extend(images)
@@ -89,14 +82,13 @@ class PDFAgent:
 
     async def query_documents(self, query, top_k=8):
         """
-        The agent's core query logic.
-        UI ENHANCEMENT: Modified to return the source chunks for UI display.
+        UI ENHANCEMENT: Modified to return source chunks for transparency.
         """
         relevant_chunks = await self.vector_store.similarity_search(query, k=top_k)
         response = await self.llm_handler.generate_response(query, relevant_chunks)
-        return response, relevant_chunks  # Return both response and sources
+        return response, relevant_chunks
 
-# --- Helper Functions (No changes needed here) ---
+# --- Helper Functions (No changes needed) ---
 def parse_source_pages(response_text: str) -> list[int]:
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     return [int(p) for p in re.findall(r'\d+', match.group(1))] if match else []
@@ -107,7 +99,7 @@ def find_relevant_images(cited_pages: list, all_images: list) -> list:
     found_images.sort(key=lambda x: (x['page'], x['index']))
     return found_images
 
-# --- Streamlit UI and Application Flow (Completely Overhauled) ---
+# --- Streamlit UI and Application Flow ---
 def main():
     st.markdown("<h1><center>🤖 Document Intelligence Agent</center></h1>", unsafe_allow_html=True)
 
@@ -115,20 +107,20 @@ def main():
     if 'agent' not in st.session_state:
         st.session_state.agent = PDFAgent()
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Welcome! Please upload your PDF documents to get started."}]
+        st.session_state.messages = [{"role": "assistant", "content": "Welcome! Please upload PDF documents to begin."}]
     if "images" not in st.session_state:
         st.session_state.images = []
     if "processed_files" not in st.session_state:
         st.session_state.processed_files = []
 
-    # --- UI ENHANCEMENT: Sidebar for Controls ---
+    # UI ENHANCEMENT: Sidebar for controls
     with st.sidebar:
         st.header("⚙️ Controls")
         uploaded_files = st.file_uploader(
             "Upload your PDF documents", 
             type=['pdf'], 
             accept_multiple_files=True,
-            help="You can upload one or more PDF files for analysis."
+            help="Upload one or more PDFs for analysis."
         )
 
         if uploaded_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
@@ -136,10 +128,10 @@ def main():
             st.session_state.messages = [{"role": "assistant", "content": f"Processing {len(uploaded_files)} documents..."}]
             st.session_state.images = []
             
-            # **CRITICAL FIX**: Use the robust async runner
+            # **CRITICAL FIX IN ACTION**: Use the robust async runner
             _, images = run_async(st.session_state.agent.process_documents(uploaded_files))
             st.session_state.images = images
-            st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are processed and ready. Ask me anything!"})
+            st.session_state.messages.append({"role": "assistant", "content": "✅ Documents processed. Ask me anything!"})
             st.rerun()
 
         if st.session_state.processed_files:
@@ -150,25 +142,22 @@ def main():
         
         st.markdown("---")
         if st.button("🗑️ Clear Session", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            for key in list(st.session_state.keys()): del st.session_state[key]
             st.rerun()
 
-    # --- UI ENHANCEMENT: Main Chat Interface ---
-    
-    # Display chat messages
+    # UI ENHANCEMENT: Main chat interface
     for message in st.session_state.messages:
         avatar = "👤" if message["role"] == "user" else "🤖"
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"])
 
-            # UI ENHANCEMENT: Display source chunks in an expander for transparency
+            # UI ENHANCEMENT: Display source chunks for transparency
             if "sources" in message and message["sources"]:
                 with st.expander("Show Sources"):
                     for i, source in enumerate(message["sources"]):
                         st.info(f"**Source {i+1} (Page {source['page']})**\n\n---\n\n" + source['text'])
 
-            # UI ENHANCEMENT: Display relevant images neatly
+            # UI ENHANCEMENT: Display relevant images
             if "images" in message and message["images"]:
                 st.markdown("**Relevant Images:**")
                 cols = st.columns(min(3, len(message["images"])))
@@ -185,10 +174,9 @@ def main():
             
             with st.chat_message("assistant", avatar="🤖"):
                 with st.spinner("Thinking..."):
-                    # **CRITICAL FIX**: Use the robust async runner and get sources
+                    # **CRITICAL FIX IN ACTION**: Use the robust async runner
                     response_text, sources = run_async(st.session_state.agent.query_documents(query))
                     
-                    # Check if the response is a valid answer
                     no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome", "hello!"]
                     is_valid_answer = not any(phrase in response_text.lower() for phrase in no_answer_phrases)
                     
@@ -197,7 +185,6 @@ def main():
                         cited_pages = parse_source_pages(response_text)
                         images_to_display = find_relevant_images(cited_pages, st.session_state.images)
 
-                    # Add the complete assistant response to history
                     assistant_message = {
                         "role": "assistant", 
                         "content": response_text,
@@ -205,8 +192,6 @@ def main():
                         "images": images_to_display
                     }
                     st.session_state.messages.append(assistant_message)
-                    
-                    # Rerun to display the new message in the main chat log
                     st.rerun()
 
 if __name__ == "__main__":
