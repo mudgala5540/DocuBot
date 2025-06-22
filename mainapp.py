@@ -16,29 +16,38 @@ nest_asyncio.apply()
 # Load environment variables from .env file
 load_dotenv()
 
-# --- Page Config (UI Enhancements) ---
+# --- Page Config (UI OVERHAUL) ---
 st.set_page_config(
-    page_title="Document Intelligence Agent",
-    page_icon="🤖",
+    page_title="IntelliDoc Agent",
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # --- THE DEFINITIVE FIX for the "Task attached to a different loop" Error ---
-# This helper function ensures we are always using the same, valid event loop
-# across all Streamlit reruns. This is the key to stability.
+# We now manage the event loop itself in the session state to guarantee stability.
+def get_or_create_eventloop():
+    """
+    Gets or creates a new asyncio event loop for the current session.
+    This is the key to preventing the "different loop" error.
+    """
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError as ex:
+        if "There is no current event loop in thread" in str(ex):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return asyncio.get_event_loop()
+
 def run_async(coro):
     """
-    Runs an asyncio coroutine in a way that is compatible with Streamlit's
-    rerun-based execution model.
+    Runs an asyncio coroutine using the session's persistent event loop.
     """
-    # Get the current running event loop. If there is none, it creates one.
-    # nest_asyncio ensures that we can "run" a loop that is already running.
-    loop = asyncio.get_event_loop()
+    loop = get_or_create_eventloop()
     return loop.run_until_complete(coro)
 
 
-# --- Agent Class (Modified to return sources for the UI) ---
+# --- Agent Class (No changes needed, but keeping it here for completeness) ---
 class PDFAgent:
     def __init__(self):
         self.pdf_processor = PDFProcessor()
@@ -46,44 +55,39 @@ class PDFAgent:
         self.llm_handler = LLMHandler()
         self.image_processor = ImageProcessor()
 
-    async def process_documents(self, uploaded_files):
+    async def process_documents(self, uploaded_files, progress_bar, status_text):
         all_chunks, all_images = [], []
+        total_files = len(uploaded_files)
         
-        # UI ENHANCEMENT: Use st.status for a cleaner processing log
-        with st.status("Processing documents...", expanded=True) as status:
-            for i, file in enumerate(uploaded_files):
-                st.write(f"➡️ Processing: {file.name}")
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                    tmp_file.write(file.getvalue())
-                    tmp_path = tmp_file.name
-                
-                try:
-                    st.write("📄 Extracting text chunks...")
-                    text_chunks = await self.pdf_processor.extract_text_chunks(tmp_path)
-                    st.write("🖼️ Extracting images...")
-                    images = await self.pdf_processor.extract_images(tmp_path)
-                    st.write("🔍 Performing OCR on images...")
-                    for img_data in images:
-                        ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
-                        if ocr_text: img_data['ocr_text'] = ocr_text.lower()
-                    
-                    all_chunks.extend(text_chunks)
-                    all_images.extend(images)
-                finally:
-                    os.unlink(tmp_path)
+        for i, file in enumerate(uploaded_files):
+            # UI OVERHAUL: Update progress bar and text dynamically
+            progress_value = (i + 1) / total_files
+            status_text.text(f"Processing file {i+1}/{total_files}: {file.name}")
+            progress_bar.progress(progress_value, text=f"Processing file {i+1}/{total_files}: {file.name}")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                tmp_file.write(file.getvalue())
+                tmp_path = tmp_file.name
             
-            st.write("🧠 Creating vector embeddings...")
-            if all_chunks:
-                await self.vector_store.add_documents(all_chunks)
-            
-            status.update(label="✅ Processing complete!", state="complete", expanded=False)
+            try:
+                text_chunks = await self.pdf_processor.extract_text_chunks(tmp_path)
+                images = await self.pdf_processor.extract_images(tmp_path)
+                for img_data in images:
+                    ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
+                    if ocr_text: img_data['ocr_text'] = ocr_text.lower()
+                all_chunks.extend(text_chunks)
+                all_images.extend(images)
+            finally:
+                os.unlink(tmp_path)
+        
+        status_text.text("Creating document embeddings...")
+        progress_bar.progress(1.0, text="Creating document embeddings...")
+        if all_chunks:
+            await self.vector_store.add_documents(all_chunks)
         
         return all_chunks, all_images
 
     async def query_documents(self, query, top_k=8):
-        """
-        UI ENHANCEMENT: Modified to return source chunks for transparency.
-        """
         relevant_chunks = await self.vector_store.similarity_search(query, k=top_k)
         response = await self.llm_handler.generate_response(query, relevant_chunks)
         return response, relevant_chunks
@@ -99,21 +103,23 @@ def find_relevant_images(cited_pages: list, all_images: list) -> list:
     found_images.sort(key=lambda x: (x['page'], x['index']))
     return found_images
 
-# --- Streamlit UI and Application Flow ---
+# --- Streamlit UI and Application Flow (Completely Overhauled) ---
 def main():
-    st.markdown("<h1><center>🤖 Document Intelligence Agent</center></h1>", unsafe_allow_html=True)
+    # --- UI OVERHAUL: Title and Header ---
+    st.markdown("<h1 style='text-align: center; color: #4A4A4A;'>✨ IntelliDoc Agent</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #6E6E6E;'>Your AI-powered assistant for document analysis. Upload PDFs and ask anything.</p>", unsafe_allow_html=True)
 
     # Initialize session state
     if 'agent' not in st.session_state:
         st.session_state.agent = PDFAgent()
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Welcome! Please upload PDF documents to begin."}]
+        st.session_state.messages = []
     if "images" not in st.session_state:
         st.session_state.images = []
     if "processed_files" not in st.session_state:
         st.session_state.processed_files = []
 
-    # UI ENHANCEMENT: Sidebar for controls
+    # UI OVERHAUL: Sidebar for controls
     with st.sidebar:
         st.header("⚙️ Controls")
         uploaded_files = st.file_uploader(
@@ -125,13 +131,23 @@ def main():
 
         if uploaded_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
             st.session_state.processed_files = [f.name for f in uploaded_files]
-            st.session_state.messages = [{"role": "assistant", "content": f"Processing {len(uploaded_files)} documents..."}]
+            st.session_state.messages = [] # Clear previous chat
             st.session_state.images = []
             
+            # UI OVERHAUL: Use a progress bar instead of st.status
+            progress_bar_placeholder = st.empty()
+            status_text_placeholder = st.empty()
+            progress_bar = progress_bar_placeholder.progress(0)
+            
             # **CRITICAL FIX IN ACTION**: Use the robust async runner
-            _, images = run_async(st.session_state.agent.process_documents(uploaded_files))
+            _, images = run_async(st.session_state.agent.process_documents(uploaded_files, progress_bar, status_text_placeholder))
             st.session_state.images = images
-            st.session_state.messages.append({"role": "assistant", "content": "✅ Documents processed. Ask me anything!"})
+            
+            # Clear progress bar after completion
+            progress_bar_placeholder.empty()
+            status_text_placeholder.empty()
+            st.success("Documents processed successfully!")
+            st.session_state.messages.append({"role": "assistant", "content": "✅ Documents processed. You can now ask me anything about their content."})
             st.rerun()
 
         if st.session_state.processed_files:
@@ -145,34 +161,37 @@ def main():
             for key in list(st.session_state.keys()): del st.session_state[key]
             st.rerun()
 
-    # UI ENHANCEMENT: Main chat interface
-    for message in st.session_state.messages:
-        avatar = "👤" if message["role"] == "user" else "🤖"
-        with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["content"])
+    # UI OVERHAUL: Main chat area with a border
+    with st.container(border=True):
+        if not st.session_state.messages:
+             st.info("Welcome! The chat history will appear here.")
 
-            # UI ENHANCEMENT: Display source chunks for transparency
-            if "sources" in message and message["sources"]:
-                with st.expander("Show Sources"):
-                    for i, source in enumerate(message["sources"]):
-                        st.info(f"**Source {i+1} (Page {source['page']})**\n\n---\n\n" + source['text'])
+        for message in st.session_state.messages:
+            avatar = "👤" if message["role"] == "user" else "✨"
+            with st.chat_message(message["role"], avatar=avatar):
+                st.markdown(message["content"])
 
-            # UI ENHANCEMENT: Display relevant images
-            if "images" in message and message["images"]:
-                st.markdown("**Relevant Images:**")
-                cols = st.columns(min(3, len(message["images"])))
-                for i, img in enumerate(message["images"]):
-                    with cols[i % 3]:
-                        st.image(img['image'], caption=f"Page {img['page']}", use_container_width=True)
+                if "sources" in message and message["sources"]:
+                    with st.expander("Show Sources"):
+                        for i, source in enumerate(message["sources"]):
+                            st.info(f"**Source {i+1} (Page {source['page']})**\n\n---\n\n" + source['text'])
 
-    # Handle new user input
-    if query := st.chat_input("Ask a question about your documents..."):
-        if not st.session_state.processed_files:
-            st.warning("Please upload and process at least one document before asking questions.")
-        else:
+                if "images" in message and message["images"]:
+                    st.markdown("**Relevant Images:**")
+                    cols = st.columns(min(3, len(message["images"])))
+                    for i, img in enumerate(message["images"]):
+                        with cols[i % 3]:
+                            st.image(img['image'], caption=f"Page {img['page']}", use_container_width=True)
+
+        # Handle new user input
+        if query := st.chat_input("Ask a question about your documents..."):
+            if not st.session_state.processed_files:
+                st.warning("Please upload and process at least one document before asking questions.")
+                st.stop()
+
             st.session_state.messages.append({"role": "user", "content": query})
             
-            with st.chat_message("assistant", avatar="🤖"):
+            with st.chat_message("assistant", avatar="✨"):
                 with st.spinner("Thinking..."):
                     # **CRITICAL FIX IN ACTION**: Use the robust async runner
                     response_text, sources = run_async(st.session_state.agent.query_documents(query))
