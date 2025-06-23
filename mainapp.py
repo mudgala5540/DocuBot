@@ -118,93 +118,96 @@ def parse_source_pages(response_text: str) -> list[int]:
     return []
 
 def is_query_document_related(query: str, response_text: str) -> bool:
-    """Determine if the query is document-related based on the response"""
+    """Determine if the query is document-related based on query and response"""
     non_document_phrases = [
         "hello", "hi", "thank", "how are you", "good morning", "good evening",
-        "i'm designed to answer questions about your uploaded documents",
-        "please ask me something related to the document content",
         "you're welcome", "goodbye", "bye"
     ]
+    nonsense_indicators = [
+        "random", "joke", "color of the sky", "weather", "asdf", "lorem ipsum"
+    ]
     
-    query_lower = query.lower()
+    query_lower = query.lower().strip()
     response_lower = response_text.lower()
     
-    # Check if it's a greeting or casual conversation
-    if any(phrase in query_lower for phrase in ["hello", "hi", "thank", "how are you", "good morning", "good evening"]):
+    # Check for greetings or casual conversation
+    if any(phrase in query_lower for phrase in non_document_phrases):
         return False
     
-    # Check if the response indicates it's not document-related
-    if any(phrase in response_lower for phrase in non_document_phrases):
+    # Check for nonsense or irrelevant queries
+    if any(indicator in query_lower for indicator in nonsense_indicators) or len(query_lower) < 5:
         return False
     
-    # Check if response contains source citation (indicates document-related answer)
-    if "(source:" in response_lower:
+    # Check if response indicates document usage
+    if "(source:" in response_lower or "based on the provided documents" in response_lower:
         return True
     
-    # Check if response mentions not finding information (still document-related query)
+    # Check if response indicates no relevant information found but is still document-related
     if "could not find" in response_lower and "document" in response_lower:
         return True
     
-    return False
+    # Default to assuming document-related if query is substantial
+    return len(query_lower.split()) > 2
 
 def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str) -> list:
-    """Enhanced image relevance matching based on query content, cited pages, and response"""
-    if not all_images:
-        return []
-    
-    # If no cited pages, don't show images for non-document queries
-    if not cited_pages:
+    """Enhanced image relevance matching with stricter criteria"""
+    if not all_images or not cited_pages:
         return []
     
     query_words = set(query.lower().split())
     response_words = set(response_text.lower().split())
     combined_search_terms = query_words.union(response_words)
     
-    # Remove common stop words
-    stop_words = {"the", "is", "at", "which", "on", "a", "an", "and", "or", "but", "in", "with", "to", "for", "of", "as", "by", "from", "about", "what", "how", "when", "where", "why", "who"}
+    # Remove stop words
+    stop_words = {
+        "the", "is", "at", "which", "on", "a", "an", "and", "or", "but", "in", 
+        "with", "to", "for", "of", "as", "by", "from", "about", "what", "how", 
+        "when", "where", "why", "who"
+    }
     search_terms = combined_search_terms - stop_words
     
     relevant_images = []
+    min_relevance_score = 2.0  # Stricter threshold for relevance
     
     for img in all_images:
-        relevance_score = 0
-        
-        # Primary filter: Must be on a cited page
-        if img['page'] not in cited_pages:
+        if img['page'] not in cited_pages or not img.get('has_meaningful_content', False):
             continue
         
-        # Must have meaningful content
-        if not img.get('has_meaningful_content', False):
-            continue
+        relevance_score = 0.0
         
-        # Check OCR text relevance
+        # OCR text relevance (weighted heavily)
         if img.get('ocr_text'):
             img_words = set(img['ocr_text'].lower().split())
             text_overlap = len(search_terms.intersection(img_words))
-            if text_overlap > 0:
-                relevance_score += text_overlap * 2  # Higher weight for text matches
+            relevance_score += text_overlap * 3.0  # Increased weight for text matches
         
-        # Check if it's a chart/diagram (often relevant for data queries)
+        # Chart/diagram relevance
         if img.get('analysis', {}).get('likely_chart_or_diagram', False):
-            # Check if query is about data, statistics, charts, graphs, etc.
-            data_keywords = {"chart", "graph", "data", "statistics", "figure", "diagram", "plot", "table", "number", "percentage", "rate", "analysis", "trend", "comparison"}
+            data_keywords = {
+                "chart", "graph", "data", "statistics", "figure", "diagram", 
+                "plot", "table", "number", "percentage", "rate", "analysis", 
+                "trend", "comparison"
+            }
             if search_terms.intersection(data_keywords):
-                relevance_score += 3
+                relevance_score += 4.0  # Higher weight for charts/diagrams
         
-        # Boost score for images that likely contain text
+        # Text-containing image relevance
         if img.get('analysis', {}).get('likely_contains_text', False):
-            relevance_score += 1
+            relevance_score += 1.5
         
-        # Only include if there's some relevance
-        if relevance_score > 0:
+        # Image quality boost (high-quality images are more likely relevant)
+        if img.get('analysis', {}).get('image_quality') == 'high':
+            relevance_score += 1.0
+        
+        # Only include images above the minimum relevance score
+        if relevance_score >= min_relevance_score:
             img_copy = img.copy()
             img_copy['relevance_score'] = relevance_score
             relevant_images.append(img_copy)
     
-    # Sort by relevance score (highest first) and then by page number
+    # Sort by relevance score (descending) and then by page number
     relevant_images.sort(key=lambda x: (-x['relevance_score'], x['page'], x['index']))
     
-    # Return all relevant images (no arbitrary limit)
     return relevant_images
 
 # --- Streamlit UI and Application Flow ---
@@ -296,13 +299,10 @@ def main():
                 # Show images only for document-related queries
                 if "images" in message and message["images"]:
                     st.markdown("**Relevant Images:**")
-                    
-                    # Display all relevant images without arbitrary limits
                     num_images = len(message["images"])
                     if num_images <= 3:
                         cols = st.columns(num_images)
                     else:
-                        # For more than 3 images, use rows of 3
                         for i in range(0, num_images, 3):
                             cols = st.columns(min(3, num_images - i))
                             for j, img in enumerate(message["images"][i:i+3]):
@@ -315,17 +315,15 @@ def main():
 
     # Chat input
     if query := st.chat_input("Ask a question about your documents..."):
-        # Always allow input, even without documents for greetings
         st.session_state.messages.append({"role": "user", "content": query})
         
         try:
             if st.session_state.processed_files:
-                # Process with documents
                 response_text, sources = run_async(st.session_state.agent.query_documents(query))
             else:
-                # Handle without documents - simple greeting response
                 simple_greetings = ["hello", "hi", "hey", "good morning", "good evening", "thank you", "thanks"]
-                if any(greeting in query.lower() for greeting in simple_greetings):
+                query_lower = query.lower().strip()
+                if any(greeting in query_lower for greeting in simple_greetings):
                     response_text = "Hello! Please upload your documents using the sidebar so I can help answer questions about them."
                     sources = []
                 else:
