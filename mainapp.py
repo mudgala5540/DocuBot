@@ -103,8 +103,14 @@ def main():
             .stApp {
                 background-color: #F0F2F6;
             }
-            .st-emotion-cache-16txtl3 {
+            .st-emotion-cache-16txtl3 { /* Main container */
                 padding: 1rem 1rem 1rem;
+            }
+            .st-emotion-cache-1avcm0n { /* Main chat input */
+                 background-color: #FFFFFF;
+            }
+            .st-emotion-cache-4oy321 { /* Sidebar */
+                background-color: #FFFFFF;
             }
         </style>
     """, unsafe_allow_html=True)
@@ -196,6 +202,8 @@ def main():
 
         st.session_state.messages.append({"role": "user", "content": query})
         
+        # DEFINITIVE FIX: Wrap the entire async operation in a try/except block
+        # to gracefully handle any potential residual errors and display them.
         try:
             # CRITICAL FIX IN ACTION
             response_text, sources = run_async(st.session_state.agent.query_documents(query))
@@ -219,7 +227,7 @@ def main():
             st.error(f"A critical error occurred: {e}")
             assistant_message = {
                 "role": "assistant",
-                "content": f"I'm sorry, I encountered a critical error trying to answer your question. The error was: {e}",
+                "content": f"I'm sorry, I encountered a critical error trying to answer your question. Please try rephrasing or clearing the session and reprocessing the documents. \n\n**Error:** `{e}`",
                 "error": True
             }
             
