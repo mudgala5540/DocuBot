@@ -31,11 +31,11 @@ class LLMHandler:
         # Prepare context from relevant chunks
         context = self._prepare_context(relevant_chunks)
         
-        # Use the enhanced agentic prompt
-        prompt = self._create_enhanced_agentic_prompt(query, context) 
+        # FIX: Call the new, more robust agentic prompt
+        prompt = self._create_agentic_prompt(query, context) 
         
         try:
-            # Generate response
+            # Generate response - CRITICAL FIX: Run in thread pool to avoid event loop issues
             response = await self._generate_with_retry_safe(prompt, max_tokens)
             
             # Track usage
@@ -52,14 +52,15 @@ class LLMHandler:
         if not chunks:
             return "No relevant context found."
         
-        # Sort chunks by similarity score to use the best ones first
+        # IMPROVEMENT: Sort chunks by similarity score to use the best ones first
         chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
 
         context_parts = []
         total_length = 0
-        max_context_length = 8000
+        max_context_length = 8000 # Give the model ample context
 
         for chunk in chunks:
+            # IMPROVEMENT: Simpler format for the LLM
             chunk_text = f"--- Context from Page {chunk.get('page', 'N/A')} ---\n{chunk['text']}\n"
             if total_length + len(chunk_text) > max_context_length:
                 break
@@ -68,49 +69,54 @@ class LLMHandler:
         
         return "\n".join(context_parts)
     
-    def _create_enhanced_agentic_prompt(self, query: str, context: str) -> str:
+
+    def _create_agentic_prompt(self, query: str, context: str) -> str:
         """
-        Enhanced agentic prompt with better intent classification and response handling
+        Creates a resilient, multi-layered prompt that instructs the AI to first
+        classify the user's intent before answering. This is the core of the agent's robustness.
         """
-        prompt = f"""You are an intelligent document analysis assistant. Your role is to provide accurate, helpful responses based strictly on the provided document context.
+        prompt = f"""You are a professional, highly intelligent document analysis assistant. Your persona is helpful, concise, and strictly factual.
 
-**CRITICAL INSTRUCTIONS:**
+Your task is to follow a sequence of rules to respond to the user's query.
 
-1. **INTENT CLASSIFICATION**: First, determine the user's intent:
-   - **Greeting/Casual**: Simple greetings, thanks, casual conversation (e.g., "hi", "hello", "thank you", "how are you")
-   - **Nonsense/Irrelevant**: Random text, gibberish, or questions completely unrelated to documents (e.g., "asdfgh", "what's the weather", "tell me a joke")
-   - **Document Query**: Specific questions that can be answered from the document context
+**--- Rules of Operation ---**
 
-2. **RESPONSE RULES**:
+**Rule 1: Analyze the User's Query Intent.**
+First, categorize the user's query into one of three types:
+  a. **Chit-Chat:** Is it a simple greeting, pleasantry, or conversational filler? (e.g., "hi", "how are you?", "thanks", "who are you?")
+  b. **Nonsense/Irrelevant:** Is it gibberish, a random string of characters, or a topic completely unrelated to business documents? (e.g., "asdfasdf", "what is the color of the sky?", "tell me a joke")
+  c. **Document-Related Query:** Is it a specific question that could plausibly be answered by the provided document context?
 
-   **For Greetings/Casual**:
-   - Respond politely and briefly
-   - Do NOT mention documents or context
-   - Example: "Hello! How can I help you with your documents today?"
+**Rule 2: Formulate Your Response Based on Intent.**
 
-   **For Nonsense/Irrelevant**:
-   - Politely redirect to document-related questions
-   - Example: "I'm designed to answer questions about your uploaded documents. Please ask me something related to the document content."
+*   **If the intent is Chit-Chat:**
+    - Respond politely and briefly as an AI assistant.
+    - DO NOT use the document context.
+    - DO NOT mention the documents.
+    - Example: If user says "thank you", you say "You're welcome! How else can I help?"
 
-   **For Document Queries**:
-   - Answer ONLY using the provided context below
-   - If the answer exists in the context: Provide a clear, detailed answer with specific page citations
-   - If the answer is NOT in the context: State clearly "Based on the provided documents, I could not find information about [topic]."
-   - ALWAYS include source citation: (Source: Page X, Page Y) at the end
-   - Be comprehensive - include ALL relevant information found in the context
-   - Use bullet points or numbered lists for clarity when appropriate
+*   **If the intent is Nonsense/Irrelevant:**
+    - State clearly and politely that your function is to answer questions about the uploaded documents.
+    - DO NOT attempt to answer the irrelevant question.
+    - Example: "I can only answer questions related to the documents you've provided. Please ask a question about their content."
 
-3. **CITATION REQUIREMENTS**:
-   - For document-related answers, ALWAYS end with: (Source: Page X, Page Y, etc.)
-   - List ALL pages that contain relevant information
-   - Be specific about which pages contain which information
+*   **If the intent is a Document-Related Query:**
+    - Scrutinize the provided "DOCUMENT CONTEXT" below to find the answer.
+    - **Your answer MUST be derived 100% from this context.** Do not use any outside knowledge.
+    - If the context contains the answer, provide it clearly and concisely. Use bullet points for lists or steps.
+    - **If the context DOES NOT contain the answer, you MUST state: "Based on the provided documents, I could not find an answer to that question."** Do not guess or hallucinate.
+    - **CRITICAL:** After your answer, you MUST add a source citation on a new line, listing the exact page numbers you used. The format must be: `(Source: Page X, Page Y)`
 
-**DOCUMENT CONTEXT:**
+**--- Execution ---**
+
+**DOCUMENT CONTEXT( context from documents ):** 
 {context}
 
-**USER QUERY:** {query}
+**USER QUESTION:**
+{query}
 
-**YOUR RESPONSE:**"""
+**ASSISTANT RESPONSE (Follow the rules above):**
+"""
         return prompt
 
     async def _generate_with_retry_safe(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
@@ -128,7 +134,7 @@ class LLMHandler:
                 try:
                     generation_config = genai_sync.types.GenerationConfig(
                         max_output_tokens=max_tokens,
-                        temperature=0.1,  # Slightly higher for more natural responses
+                        temperature=0.0,
                         top_p=0.95,
                         top_k=40
                     )
@@ -157,6 +163,35 @@ class LLMHandler:
             result = await loop.run_in_executor(executor, sync_generate)
             return result
 
+    async def _generate_with_retry(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
+        """Generate response with retry logic"""
+        
+        for attempt in range(max_retries):
+            try:
+                # IMPROVEMENT: Set temperature to 0.0 for maximum factuality
+                generation_config = genai.types.GenerationConfig(
+                    max_output_tokens=max_tokens,
+                    temperature=0.0,
+                    top_p=0.95,
+                    top_k=40
+                )
+                
+                # IMPROVEMENT: Use the asynchronous version of the call for better performance
+                response = await self.model.generate_content_async(
+                    prompt,
+                    generation_config=generation_config
+                )
+                
+                return response.text
+                
+            except Exception as e:
+                print(f"LLM generation failed on attempt {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    raise e
+                await asyncio.sleep(2 ** attempt)
+        
+        return "Failed to generate response after multiple attempts."
+    
     async def summarize_document(self, chunks: List[Dict[str, Any]]) -> str:
         """Generate a summary of the entire document"""
         
