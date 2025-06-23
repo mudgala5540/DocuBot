@@ -26,17 +26,27 @@ st.set_page_config(
 
 # --- THE DEFINITIVE FIX for the "Task attached to a different loop" Error ---
 # This helper function ensures we are always using the same, valid event loop
-# across all Streamlit reruns. This is the key to stability.
+# across all Streamlit reruns by storing the loop in the session state.
+@st.cache_resource(experimental_allow_widgets=True)
 def get_or_create_eventloop():
+    """
+    Gets or creates a new asyncio event loop for the current session.
+    The @st.cache_resource decorator ensures this function runs only once
+    per session, creating a single, persistent event loop.
+    """
     try:
-        return asyncio.get_event_loop()
-    except RuntimeError as ex:
-        if "There is no current event loop in thread" in str(ex):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return asyncio.get_event_loop()
+        # Check if there is a running loop
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # If not, create a new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
 
 def run_async(coro):
+    """
+    Runs an asyncio coroutine using the session's persistent event loop.
+    """
     loop = get_or_create_eventloop()
     return loop.run_until_complete(coro)
 
@@ -97,28 +107,9 @@ def find_relevant_images(cited_pages: list, all_images: list) -> list:
 
 # --- Streamlit UI and Application Flow (Completely Overhauled) ---
 def main():
-    # UI OVERHAUL: Custom CSS for a more polished look
-    st.markdown("""
-        <style>
-            .stApp {
-                background-color: #F0F2F6;
-            }
-            .st-emotion-cache-16txtl3 { /* Main container */
-                padding: 1rem 1rem 1rem;
-            }
-            .st-emotion-cache-1avcm0n { /* Main chat input */
-                 background-color: #FFFFFF;
-            }
-            .st-emotion-cache-4oy321 { /* Sidebar */
-                background-color: #FFFFFF;
-            }
-        </style>
-    """, unsafe_allow_html=True)
-    
     st.markdown("<h1 style='text-align: center; color: #1E1E1E;'>✨ IntelliDoc Agent</h1>", unsafe_allow_html=True)
 
     # DEFINITIVE FIX: Lazily initialize the agent and store it in session state.
-    # This ensures it's created only ONCE per session in the correct context.
     if 'agent' not in st.session_state:
         st.session_state.agent = PDFAgent()
     if "messages" not in st.session_state:
@@ -142,9 +133,8 @@ def main():
             st.session_state.messages = []
             st.session_state.images = []
             
-            # UI OVERHAUL: Correct progress bar implementation
             progress_bar_placeholder = st.empty()
-            progress_bar = progress_bar_placeholder.progress(0)
+            progress_bar = progress_bar_placeholder.progress(0, text="Initializing processing...")
             
             # CRITICAL FIX IN ACTION
             _, images = run_async(st.session_state.agent.process_documents(uploaded_files, progress_bar))
@@ -176,7 +166,6 @@ def main():
         for message in st.session_state.messages:
             avatar = "👤" if message["role"] == "user" else "✨"
             with st.chat_message(message["role"], avatar=avatar):
-                # Display error messages in a more user-friendly way
                 if "error" in message:
                     st.error(message["content"])
                 else:
@@ -194,7 +183,7 @@ def main():
                         with cols[i % 3]:
                             st.image(img['image'], caption=f"Page {img['page']}", use_container_width=True)
 
-    # Chat input is now outside the bordered container for better layout
+    # Chat input is outside the bordered container for better layout
     if query := st.chat_input("Ask a question about your documents..."):
         if not st.session_state.processed_files:
             st.warning("Please upload and process at least one document first.")
@@ -202,8 +191,6 @@ def main():
 
         st.session_state.messages.append({"role": "user", "content": query})
         
-        # DEFINITIVE FIX: Wrap the entire async operation in a try/except block
-        # to gracefully handle any potential residual errors and display them.
         try:
             # CRITICAL FIX IN ACTION
             response_text, sources = run_async(st.session_state.agent.query_documents(query))
@@ -216,20 +203,10 @@ def main():
                 cited_pages = parse_source_pages(response_text)
                 images_to_display = find_relevant_images(cited_pages, st.session_state.images)
 
-            assistant_message = {
-                "role": "assistant", 
-                "content": response_text,
-                "sources": sources if is_valid_answer else [],
-                "images": images_to_display
-            }
+            assistant_message = { "role": "assistant", "content": response_text, "sources": sources if is_valid_answer else [], "images": images_to_display }
         except Exception as e:
-            # Gracefully handle any unexpected errors from the async call
             st.error(f"A critical error occurred: {e}")
-            assistant_message = {
-                "role": "assistant",
-                "content": f"I'm sorry, I encountered a critical error trying to answer your question. Please try rephrasing or clearing the session and reprocessing the documents. \n\n**Error:** `{e}`",
-                "error": True
-            }
+            assistant_message = { "role": "assistant", "content": f"I'm sorry, I encountered a critical error. Please try again. \n\n**Error:** `{e}`", "error": True }
             
         st.session_state.messages.append(assistant_message)
         st.rerun()
