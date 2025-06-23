@@ -13,7 +13,8 @@ class PDFProcessor:
     
     async def extract_text_chunks(self, pdf_path: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
         """Extract text from PDF and create intelligent chunks"""
-        loop = asyncio.get_event_loop()
+        # FIX: Use the current running loop instead of get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._extract_text_chunks_sync, pdf_path, chunk_size, overlap)
     
     def _extract_text_chunks_sync(self, pdf_path: str, chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
@@ -94,7 +95,8 @@ class PDFProcessor:
     
     async def extract_images(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract images from PDF"""
-        loop = asyncio.get_event_loop()
+        # FIX: Use the current running loop instead of get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._extract_images_sync, pdf_path)
     
     def _extract_images_sync(self, pdf_path: str) -> List[Dict[str, Any]]:

@@ -17,7 +17,8 @@ class ImageProcessor:
     
     async def extract_text_from_image(self, image: Image.Image) -> str:
         """Extract text from image using OCR"""
-        loop = asyncio.get_event_loop()
+        # FIX: Use the current running loop instead of get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._extract_text_sync, image)
     
     def _extract_text_sync(self, image: Image.Image) -> str:
@@ -110,7 +111,8 @@ class ImageProcessor:
     
     async def analyze_image_content(self, image: Image.Image) -> Dict[str, Any]:
         """Analyze image content and properties"""
-        loop = asyncio.get_event_loop()
+        # FIX: Use the current running loop instead of get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._analyze_image_sync, image)
     
     def _analyze_image_sync(self, image: Image.Image) -> Dict[str, Any]:
@@ -151,7 +153,8 @@ class ImageProcessor:
     
     async def extract_tables_from_image(self, image: Image.Image) -> List[List[str]]:
         """Extract table data from image"""
-        loop = asyncio.get_event_loop()
+        # FIX: Use the current running loop instead of get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._extract_tables_sync, image)
     
     def _extract_tables_sync(self, image: Image.Image) -> List[List[str]]:

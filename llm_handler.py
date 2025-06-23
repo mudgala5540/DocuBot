@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 from datetime import datetime
+import threading
 
 class LLMHandler:
     def __init__(self):
@@ -20,6 +21,9 @@ class LLMHandler:
         # Token tracking for cost monitoring
         self.total_tokens_used = 0
         self.requests_made = 0
+        
+        # Thread lock for thread safety
+        self._lock = threading.Lock()
     
     async def generate_response(self, query: str, relevant_chunks: List[Dict[str, Any]], max_tokens: int = 2000) -> str:
         """Generate response using relevant document chunks"""
@@ -31,11 +35,12 @@ class LLMHandler:
         prompt = self._create_agentic_prompt(query, context) 
         
         try:
-            # Generate response
-            response = await self._generate_with_retry(prompt, max_tokens)
+            # Generate response - CRITICAL FIX: Run in thread pool to avoid event loop issues
+            response = await self._generate_with_retry_safe(prompt, max_tokens)
             
             # Track usage
-            self.requests_made += 1
+            with self._lock:
+                self.requests_made += 1
             
             return response
             
@@ -114,7 +119,49 @@ First, categorize the user's query into one of three types:
 """
         return prompt
 
-
+    async def _generate_with_retry_safe(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
+        """Generate response with retry logic - SAFE VERSION"""
+        
+        def sync_generate():
+            """Synchronous generation function to run in thread pool"""
+            import google.generativeai as genai_sync
+            
+            # Configure in this thread
+            genai_sync.configure(api_key=self.api_key)
+            model_sync = genai_sync.GenerativeModel('gemini-1.5-flash')
+            
+            for attempt in range(max_retries):
+                try:
+                    generation_config = genai_sync.types.GenerationConfig(
+                        max_output_tokens=max_tokens,
+                        temperature=0.0,
+                        top_p=0.95,
+                        top_k=40
+                    )
+                    
+                    response = model_sync.generate_content(
+                        prompt,
+                        generation_config=generation_config
+                    )
+                    
+                    return response.text
+                    
+                except Exception as e:
+                    print(f"LLM generation failed on attempt {attempt + 1}: {e}")
+                    if attempt == max_retries - 1:
+                        raise e
+                    import time
+                    time.sleep(2 ** attempt)
+            
+            return "Failed to generate response after multiple attempts."
+        
+        # Run the synchronous function in a thread pool
+        loop = asyncio.get_event_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = await loop.run_in_executor(executor, sync_generate)
+            return result
 
     async def _generate_with_retry(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
         """Generate response with retry logic"""
@@ -167,7 +214,7 @@ Please provide:
 Keep the summary concise but informative."""
 
         try:
-            response = await self._generate_with_retry(prompt, 800)
+            response = await self._generate_with_retry_safe(prompt, 800)
             return response
         except Exception as e:
             return f"Error generating summary: {str(e)}"
@@ -219,7 +266,7 @@ Find and extract:
 Return the information in a structured format."""
 
         try:
-            response = await self._generate_with_retry(prompt, 600)
+            response = await self._generate_with_retry_safe(prompt, 600)
             return {"extracted_info": response, "info_type": info_type}
         except Exception as e:
             return {"error": f"Error extracting information: {str(e)}"}
@@ -246,7 +293,7 @@ Please provide:
 Format your response clearly with these sections."""
 
         try:
-            response = await self._generate_with_retry(prompt, 1200)
+            response = await self._generate_with_retry_safe(prompt, 1200)
             
             # Parse the structured response
             sections = self._parse_structured_response(response)
@@ -281,12 +328,13 @@ Format your response clearly with these sections."""
     
     def get_usage_stats(self) -> Dict[str, Any]:
         """Get usage statistics for cost monitoring"""
-        return {
-            "total_requests": self.requests_made,
-            "estimated_tokens": self.total_tokens_used,
-            "model_used": "gemini-1.5-flash",
-            "last_request": datetime.now().isoformat()
-        }
+        with self._lock:
+            return {
+                "total_requests": self.requests_made,
+                "estimated_tokens": self.total_tokens_used,
+                "model_used": "gemini-1.5-flash",
+                "last_request": datetime.now().isoformat()
+            }
     
     async def batch_process_queries(self, queries: List[str], relevant_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process multiple queries efficiently"""

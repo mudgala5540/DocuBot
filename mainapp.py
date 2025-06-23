@@ -26,32 +26,31 @@ st.set_page_config(
 
 # --- THE DEFINITIVE FIX for the "Task attached to a different loop" Error ---
 # This helper function ensures we are always using the same, valid event loop
-# across all Streamlit reruns by storing the loop in the session state.
-@st.cache_resource(experimental_allow_widgets=True)
+# across all Streamlit reruns. This is the key to stability.
 def get_or_create_eventloop():
-    """
-    Gets or creates a new asyncio event loop for the current session.
-    The @st.cache_resource decorator ensures this function runs only once
-    per session, creating a single, persistent event loop.
-    """
     try:
-        # Check if there is a running loop
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+        return loop
     except RuntimeError:
-        # If not, create a new one
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return loop
+        return loop
 
 def run_async(coro):
-    """
-    Runs an asyncio coroutine using the session's persistent event loop.
-    """
+    """Run async coroutine in the current event loop safely"""
     loop = get_or_create_eventloop()
-    return loop.run_until_complete(coro)
+    if loop.is_running():
+        # If loop is already running, we need to create a new task
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return loop.run_until_complete(coro)
 
-
-# --- Agent Class (No changes needed, but keeping it here for completeness) ---
+# --- Agent Class (CRITICAL FIX APPLIED) ---
 class PDFAgent:
     def __init__(self):
         self.pdf_processor = PDFProcessor()
@@ -107,9 +106,22 @@ def find_relevant_images(cited_pages: list, all_images: list) -> list:
 
 # --- Streamlit UI and Application Flow (Completely Overhauled) ---
 def main():
+    # UI OVERHAUL: Custom CSS for a more polished look
+    st.markdown("""
+        <style>
+            .stApp {
+                background-color: #F0F2F6;
+            }
+            .st-emotion-cache-16txtl3 {
+                padding: 1rem 1rem 1rem;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
     st.markdown("<h1 style='text-align: center; color: #1E1E1E;'>✨ IntelliDoc Agent</h1>", unsafe_allow_html=True)
 
     # DEFINITIVE FIX: Lazily initialize the agent and store it in session state.
+    # This ensures it's created only ONCE per session in the correct context.
     if 'agent' not in st.session_state:
         st.session_state.agent = PDFAgent()
     if "messages" not in st.session_state:
@@ -133,16 +145,20 @@ def main():
             st.session_state.messages = []
             st.session_state.images = []
             
+            # UI OVERHAUL: Correct progress bar implementation
             progress_bar_placeholder = st.empty()
-            progress_bar = progress_bar_placeholder.progress(0, text="Initializing processing...")
+            progress_bar = progress_bar_placeholder.progress(0)
             
             # CRITICAL FIX IN ACTION
-            _, images = run_async(st.session_state.agent.process_documents(uploaded_files, progress_bar))
-            st.session_state.images = images
-            
-            progress_bar_placeholder.empty()
-            st.success("Documents processed successfully!")
-            st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
+            try:
+                _, images = run_async(st.session_state.agent.process_documents(uploaded_files, progress_bar))
+                st.session_state.images = images
+                progress_bar_placeholder.empty()
+                st.success("Documents processed successfully!")
+                st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
+            except Exception as e:
+                progress_bar_placeholder.empty()
+                st.error(f"Error processing documents: {e}")
             st.rerun()
 
         if st.session_state.processed_files:
@@ -166,6 +182,7 @@ def main():
         for message in st.session_state.messages:
             avatar = "👤" if message["role"] == "user" else "✨"
             with st.chat_message(message["role"], avatar=avatar):
+                # Display error messages in a more user-friendly way
                 if "error" in message:
                     st.error(message["content"])
                 else:
@@ -183,7 +200,7 @@ def main():
                         with cols[i % 3]:
                             st.image(img['image'], caption=f"Page {img['page']}", use_container_width=True)
 
-    # Chat input is outside the bordered container for better layout
+    # Chat input is now outside the bordered container for better layout
     if query := st.chat_input("Ask a question about your documents..."):
         if not st.session_state.processed_files:
             st.warning("Please upload and process at least one document first.")
@@ -192,7 +209,7 @@ def main():
         st.session_state.messages.append({"role": "user", "content": query})
         
         try:
-            # CRITICAL FIX IN ACTION
+            # CRITICAL FIX IN ACTION - Use the safe async runner
             response_text, sources = run_async(st.session_state.agent.query_documents(query))
             
             no_answer_phrases = ["i can only answer", "could not find an answer", "you're welcome", "hello!"]
@@ -203,10 +220,20 @@ def main():
                 cited_pages = parse_source_pages(response_text)
                 images_to_display = find_relevant_images(cited_pages, st.session_state.images)
 
-            assistant_message = { "role": "assistant", "content": response_text, "sources": sources if is_valid_answer else [], "images": images_to_display }
+            assistant_message = {
+                "role": "assistant", 
+                "content": response_text,
+                "sources": sources if is_valid_answer else [],
+                "images": images_to_display
+            }
         except Exception as e:
+            # Gracefully handle any unexpected errors from the async call
             st.error(f"A critical error occurred: {e}")
-            assistant_message = { "role": "assistant", "content": f"I'm sorry, I encountered a critical error. Please try again. \n\n**Error:** `{e}`", "error": True }
+            assistant_message = {
+                "role": "assistant",
+                "content": f"I'm sorry, I encountered a critical error trying to answer your question. The error was: {e}",
+                "error": True
+            }
             
         st.session_state.messages.append(assistant_message)
         st.rerun()
