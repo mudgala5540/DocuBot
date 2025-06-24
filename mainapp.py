@@ -82,15 +82,16 @@ class PDFAgent:
                         img_data['ocr_text'] = ocr_text.lower() if ocr_text else ""
                         img_data['analysis'] = img_analysis
                         img_data['has_meaningful_content'] = (
-                            len(ocr_text.strip()) > 10 or  # Has substantial text
+                            len(ocr_text.strip()) > 5 or  # Reduced threshold for text
                             img_analysis.get('likely_chart_or_diagram', False) or  # Is a chart/diagram
-                            img_analysis.get('likely_contains_text', False)  # Contains text elements
+                            img_analysis.get('likely_contains_text', False) or  # Contains text elements
+                            img_analysis.get('image_quality') in ['high', 'medium']  # Good quality images
                         )
                     except Exception as e:
                         print(f"Error processing image on page {img_data['page']}: {e}")
                         img_data['ocr_text'] = ""
                         img_data['analysis'] = {}
-                        img_data['has_meaningful_content'] = False
+                        img_data['has_meaningful_content'] = True  # Default to True to be inclusive
                 
                 all_chunks.extend(text_chunks)
                 all_images.extend(images)
@@ -110,105 +111,162 @@ class PDFAgent:
 
 # --- Enhanced Helper Functions ---
 def parse_source_pages(response_text: str) -> list[int]:
-    """Extract page numbers from source citations"""
+    """Extract page numbers from source citations with multiple patterns"""
+    pages = []
+    
+    # Pattern 1: (Source: Page X, Page Y)
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     if match:
-        page_numbers = re.findall(r'\d+', match.group(1))
-        return [int(p) for p in page_numbers]
-    return []
+        page_numbers = re.findall(r'(?:Page\s+)?(\d+)', match.group(1), re.IGNORECASE)
+        pages.extend([int(p) for p in page_numbers])
+    
+    # Pattern 2: Look for any page references in the response
+    page_refs = re.findall(r'(?:page|pg)\s+(\d+)', response_text, re.IGNORECASE)
+    pages.extend([int(p) for p in page_refs])
+    
+    # Remove duplicates and return
+    return list(set(pages)) if pages else []
 
 def is_query_document_related(query: str, response_text: str) -> bool:
     """Determine if the query is document-related based on query and response"""
-    non_document_phrases = [
-        "hello", "hi", "thank", "how are you", "good morning", "good evening",
-        "you're welcome", "goodbye", "bye"
+    # Simple greetings and pleasantries
+    casual_phrases = [
+        "hello", "hi", "hey", "thank", "thanks", "thank you", "you're welcome",
+        "how are you", "good morning", "good afternoon", "good evening", 
+        "goodbye", "bye", "see you", "nice to meet", "pleasure"
     ]
-    nonsense_indicators = [
-        "random", "joke", "color of the sky", "weather", "asdf", "lorem ipsum"
+    
+    # Nonsense or clearly irrelevant queries
+    irrelevant_phrases = [
+        "asdf", "qwerty", "lorem ipsum", "test test", "xyz", "abc",
+        "color of the sky", "weather today", "tell me a joke", "what's funny",
+        "random question", "how's the weather"
     ]
     
     query_lower = query.lower().strip()
     response_lower = response_text.lower()
     
-    # Check for greetings or casual conversation
-    if any(phrase in query_lower for phrase in non_document_phrases):
+    # Check for casual conversation
+    if any(phrase in query_lower for phrase in casual_phrases):
         return False
     
-    # Check for nonsense or irrelevant queries
-    if any(indicator in query_lower for indicator in nonsense_indicators) or len(query_lower) < 5:
+    # Check for nonsense queries
+    if (any(phrase in query_lower for phrase in irrelevant_phrases) or 
+        len(query_lower) < 3 or 
+        query_lower.count(query_lower[0]) > len(query_lower) * 0.7):  # Repetitive characters
         return False
     
     # Check if response indicates document usage
-    if "(source:" in response_lower or "based on the provided documents" in response_lower:
+    document_indicators = [
+        "(source:", "based on the provided documents", "from the document",
+        "according to the document", "the document shows", "as mentioned in",
+        "could not find", "page"
+    ]
+    
+    if any(indicator in response_lower for indicator in document_indicators):
         return True
     
-    # Check if response indicates no relevant information found but is still document-related
-    if "could not find" in response_lower and "document" in response_lower:
-        return True
-    
-    # Default to assuming document-related if query is substantial
-    return len(query_lower.split()) > 2
+    # If query has meaningful content and doesn't match casual/irrelevant patterns
+    return len(query_lower.split()) > 1
 
-def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str) -> list:
-    """Enhanced image relevance matching with stricter criteria"""
-    if not all_images or not cited_pages:
+def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str, source_chunks: list = None) -> list:
+    """Enhanced image relevance matching with comprehensive scoring"""
+    if not all_images:
         return []
+    
+    # If no cited pages, try to find pages from source chunks
+    if not cited_pages and source_chunks:
+        cited_pages = list(set([chunk.get('page', 0) for chunk in source_chunks if chunk.get('page')]))
+    
+    # If still no pages, include all pages but with lower base score
+    include_all_pages = not cited_pages
     
     query_words = set(query.lower().split())
     response_words = set(response_text.lower().split())
     combined_search_terms = query_words.union(response_words)
     
-    # Remove stop words
+    # Remove common stop words but keep important ones
     stop_words = {
         "the", "is", "at", "which", "on", "a", "an", "and", "or", "but", "in", 
-        "with", "to", "for", "of", "as", "by", "from", "about", "what", "how", 
-        "when", "where", "why", "who"
+        "with", "to", "for", "of", "as", "by", "from", "about", "this", "that",
+        "they", "them", "their", "there", "then", "than", "these", "those"
     }
     search_terms = combined_search_terms - stop_words
     
     relevant_images = []
-    min_relevance_score = 2.0  # Stricter threshold for relevance
     
     for img in all_images:
-        if img['page'] not in cited_pages or not img.get('has_meaningful_content', False):
+        # Skip images not on cited pages (unless including all)
+        if not include_all_pages and img['page'] not in cited_pages:
             continue
         
         relevance_score = 0.0
         
-        # OCR text relevance (weighted heavily)
+        # Base score for being on a cited page
+        if not include_all_pages and img['page'] in cited_pages:
+            relevance_score += 2.0
+        elif include_all_pages:
+            relevance_score += 0.5  # Lower base score when no specific pages cited
+        
+        # OCR text relevance (high weight)
         if img.get('ocr_text'):
             img_words = set(img['ocr_text'].lower().split())
             text_overlap = len(search_terms.intersection(img_words))
-            relevance_score += text_overlap * 3.0  # Increased weight for text matches
+            if text_overlap > 0:
+                relevance_score += text_overlap * 2.5
+            
+            # Bonus for exact phrase matches
+            for term in search_terms:
+                if len(term) > 3 and term in img['ocr_text']:
+                    relevance_score += 1.5
         
         # Chart/diagram relevance
         if img.get('analysis', {}).get('likely_chart_or_diagram', False):
             data_keywords = {
                 "chart", "graph", "data", "statistics", "figure", "diagram", 
                 "plot", "table", "number", "percentage", "rate", "analysis", 
-                "trend", "comparison"
+                "trend", "comparison", "result", "finding", "metric", "value"
             }
-            if search_terms.intersection(data_keywords):
-                relevance_score += 4.0  # Higher weight for charts/diagrams
+            keyword_matches = search_terms.intersection(data_keywords)
+            if keyword_matches:
+                relevance_score += len(keyword_matches) * 3.0
+            else:
+                # Even if no direct matches, charts are often relevant
+                relevance_score += 1.0
         
         # Text-containing image relevance
         if img.get('analysis', {}).get('likely_contains_text', False):
-            relevance_score += 1.5
-        
-        # Image quality boost (high-quality images are more likely relevant)
-        if img.get('analysis', {}).get('image_quality') == 'high':
             relevance_score += 1.0
         
-        # Only include images above the minimum relevance score
-        if relevance_score >= min_relevance_score:
+        # Image quality bonus
+        quality = img.get('analysis', {}).get('image_quality', 'low')
+        if quality == 'high':
+            relevance_score += 1.0
+        elif quality == 'medium':
+            relevance_score += 0.5
+        
+        # Content type bonuses
+        if img.get('has_meaningful_content', False):
+            relevance_score += 0.5
+        
+        # Size bonus for substantial images
+        if img.get('width', 0) > 500 and img.get('height', 0) > 300:
+            relevance_score += 0.5
+        
+        # Always include images with some relevance (lowered threshold)
+        min_relevance_threshold = 0.5 if include_all_pages else 1.0
+        
+        if relevance_score >= min_relevance_threshold:
             img_copy = img.copy()
             img_copy['relevance_score'] = relevance_score
             relevant_images.append(img_copy)
     
     # Sort by relevance score (descending) and then by page number
-    relevant_images.sort(key=lambda x: (-x['relevance_score'], x['page'], x['index']))
+    relevant_images.sort(key=lambda x: (-x['relevance_score'], x['page'], x.get('index', 0)))
     
-    return relevant_images
+    # Limit to reasonable number but be more generous
+    max_images = 10 if len(relevant_images) > 10 else len(relevant_images)
+    return relevant_images[:max_images]
 
 # --- Streamlit UI and Application Flow ---
 def main():
@@ -269,6 +327,14 @@ def main():
             for file_name in st.session_state.processed_files:
                 st.info(f"📄 {file_name}")
         
+        # Debug info
+        if st.session_state.images:
+            st.markdown("---")
+            st.subheader("📊 Debug Info")
+            st.info(f"Total images: {len(st.session_state.images)}")
+            st.info(f"Images with OCR: {sum(1 for img in st.session_state.images if img.get('ocr_text'))}")
+            st.info(f"Meaningful images: {sum(1 for img in st.session_state.images if img.get('has_meaningful_content'))}")
+        
         st.markdown("---")
         if st.button("🗑️ Clear Session", use_container_width=True):
             for key in list(st.session_state.keys()): 
@@ -292,26 +358,31 @@ def main():
 
                 # Show sources only for document-related queries
                 if "sources" in message and message["sources"] and message.get("is_document_related", True):
-                    with st.expander("Show Sources"):
+                    with st.expander("📚 Show Sources"):
                         for i, source in enumerate(message["sources"]):
-                            st.info(f"**Source {i+1} (Page {source['page']})**\n\n---\n\n" + source['text'])
+                            st.info(f"**Source {i+1} (Page {source['page']}, Score: {source.get('similarity_score', 0):.3f})**\n\n{source['text']}")
 
-                # Show images only for document-related queries
+                # Show images for document-related queries
                 if "images" in message and message["images"]:
-                    st.markdown("**Relevant Images:**")
+                    st.markdown("**🖼️ Relevant Images:**")
+                    
+                    # Display images in a grid
                     num_images = len(message["images"])
-                    if num_images <= 3:
-                        cols = st.columns(num_images)
-                    else:
-                        for i in range(0, num_images, 3):
-                            cols = st.columns(min(3, num_images - i))
-                            for j, img in enumerate(message["images"][i:i+3]):
-                                with cols[j]:
-                                    st.image(
-                                        img['image'], 
-                                        caption=f"Page {img['page']} (Relevance: {img.get('relevance_score', 0):.1f})", 
-                                        use_container_width=True
-                                    )
+                    cols_per_row = 3
+                    
+                    for i in range(0, num_images, cols_per_row):
+                        cols = st.columns(min(cols_per_row, num_images - i))
+                        for j, img in enumerate(message["images"][i:i+cols_per_row]):
+                            with cols[j]:
+                                st.image(
+                                    img['image'], 
+                                    caption=f"📄 Page {img['page']} | Score: {img.get('relevance_score', 0):.1f}", 
+                                    use_container_width=True
+                                )
+                                # Show OCR text if available
+                                if img.get('ocr_text') and len(img['ocr_text'].strip()) > 10:
+                                    with st.expander(f"📝 Text from Page {img['page']}"):
+                                        st.text(img['ocr_text'][:200] + "..." if len(img['ocr_text']) > 200 else img['ocr_text'])
 
     # Chat input
     if query := st.chat_input("Ask a question about your documents..."):
@@ -333,12 +404,12 @@ def main():
             # Determine if this is a document-related query
             is_doc_related = is_query_document_related(query, response_text)
             
-            # Find relevant images only for document-related queries
+            # Find relevant images for document-related queries
             images_to_display = []
             if is_doc_related and st.session_state.images:
                 cited_pages = parse_source_pages(response_text)
                 images_to_display = find_relevant_images_enhanced(
-                    query, cited_pages, st.session_state.images, response_text
+                    query, cited_pages, st.session_state.images, response_text, sources
                 )
 
             assistant_message = {

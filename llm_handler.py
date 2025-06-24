@@ -31,11 +31,11 @@ class LLMHandler:
         # Prepare context from relevant chunks
         context = self._prepare_context(relevant_chunks)
         
-        # FIX: Call the new, more robust agentic prompt
-        prompt = self._create_agentic_prompt(query, context) 
+        # Create the enhanced agentic prompt
+        prompt = self._create_enhanced_agentic_prompt(query, context) 
         
         try:
-            # Generate response - CRITICAL FIX: Run in thread pool to avoid event loop issues
+            # Generate response - Run in thread pool to avoid event loop issues
             response = await self._generate_with_retry_safe(prompt, max_tokens)
             
             # Track usage
@@ -52,16 +52,16 @@ class LLMHandler:
         if not chunks:
             return "No relevant context found."
         
-        # IMPROVEMENT: Sort chunks by similarity score to use the best ones first
+        # Sort chunks by similarity score to use the best ones first
         chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
 
         context_parts = []
         total_length = 0
-        max_context_length = 8000 # Give the model ample context
+        max_context_length = 10000  # Increased context length for better responses
 
         for chunk in chunks:
-            # IMPROVEMENT: Simpler format for the LLM
-            chunk_text = f"--- Context from Page {chunk.get('page', 'N/A')} ---\n{chunk['text']}\n"
+            # Include page numbers for better source tracking
+            chunk_text = f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}\n"
             if total_length + len(chunk_text) > max_context_length:
                 break
             context_parts.append(chunk_text)
@@ -69,54 +69,54 @@ class LLMHandler:
         
         return "\n".join(context_parts)
     
-
-    def _create_agentic_prompt(self, query: str, context: str) -> str:
+    def _create_enhanced_agentic_prompt(self, query: str, context: str) -> str:
         """
-        Creates a resilient, multi-layered prompt that instructs the AI to first
-        classify the user's intent before answering. This is the core of the agent's robustness.
+        Enhanced agentic prompt that better handles query classification and provides
+        more comprehensive responses with proper source citation.
         """
-        prompt = f"""You are a professional, highly intelligent document analysis assistant. Your persona is helpful, concise, and strictly factual.
+        prompt = f"""You are IntelliDoc Agent, a professional document analysis AI assistant. You are highly intelligent, helpful, and always provide accurate information based solely on the provided documents.
 
-Your task is to follow a sequence of rules to respond to the user's query.
+**CRITICAL INSTRUCTION: Follow this exact process for every query:**
 
-**--- Rules of Operation ---**
+**STEP 1: ANALYZE THE USER'S QUERY TYPE**
 
-**Rule 1: Analyze the User's Query Intent.**
-First, categorize the user's query into one of three types:
-  a. **Chit-Chat:** Is it a simple greeting, pleasantry, or conversational filler? (e.g., "hi", "how are you?", "thanks", "who are you?")
-  b. **Nonsense/Irrelevant:** Is it gibberish, a random string of characters, or a topic completely unrelated to business documents? (e.g., "asdfasdf", "what is the color of the sky?", "tell me a joke")
-  c. **Document-Related Query:** Is it a specific question that could plausibly be answered by the provided document context?
+Classify the query into one of these categories:
+- **GREETING/CASUAL**: Simple greetings, thanks, pleasantries (e.g., "hi", "hello", "thank you", "how are you")
+- **IRRELEVANT/NONSENSE**: Random strings, completely unrelated topics, gibberish (e.g., "asdfgh", "what's the weather", "tell me a joke")  
+- **DOCUMENT_QUERY**: Any question that could potentially be answered using the provided document context
 
-**Rule 2: Formulate Your Response Based on Intent.**
+**STEP 2: RESPOND BASED ON QUERY TYPE**
 
-*   **If the intent is Chit-Chat:**
-    - Respond politely and briefly as an AI assistant.
-    - DO NOT use the document context.
-    - DO NOT mention the documents.
-    - Example: If user says "thank you", you say "You're welcome! How else can I help?"
+**For GREETING/CASUAL queries:**
+- Respond politely and professionally as an AI assistant
+- DO NOT mention or use the document context
+- Keep response brief and friendly
+- Example: "Hello! I'm here to help you with questions about your documents. What would you like to know?"
 
-*   **If the intent is Nonsense/Irrelevant:**
-    - State clearly and politely that your function is to answer questions about the uploaded documents.
-    - DO NOT attempt to answer the irrelevant question.
-    - Example: "I can only answer questions related to the documents you've provided. Please ask a question about their content."
+**For IRRELEVANT/NONSENSE queries:**
+- Politely redirect to document-related topics
+- DO NOT attempt to answer the irrelevant question
+- Example: "I specialize in answering questions about the documents you've uploaded. Please ask me something about their content."
 
-*   **If the intent is a Document-Related Query:**
-    - Scrutinize the provided "DOCUMENT CONTEXT" below to find the answer.
-    - **Your answer MUST be derived 100% from this context.** Do not use any outside knowledge.
-    - If the context contains the answer, provide it clearly and concisely. Use bullet points for lists or steps.
-    - **If the context DOES NOT contain the answer, you MUST state: "Based on the provided documents, I could not find an answer to that question."** Do not guess or hallucinate.
-    - **CRITICAL:** After your answer, you MUST add a source citation on a new line, listing the exact page numbers you used. The format must be: `(Source: Page X, Page Y)`
+**For DOCUMENT_QUERY:**
+- Use ONLY the provided document context below to answer
+- Provide comprehensive, detailed answers when the information is available
+- If the context contains the answer, include:
+  * Clear, well-structured response
+  * Specific details and data points
+  * Bullet points or numbered lists when appropriate
+  * Professional tone with confidence
+- If the context does NOT contain sufficient information, state clearly: "Based on the provided documents, I could not find enough information to answer that question."
+- ALWAYS end with source citation: (Source: Page X, Page Y, Page Z) listing ALL pages referenced
+- Be thorough - if there are multiple relevant sections, include information from all of them
 
-**--- Execution ---**
-
-**DOCUMENT CONTEXT( context from documents ):** 
+**DOCUMENT CONTEXT:**
 {context}
 
-**USER QUESTION:**
-{query}
+**USER QUERY:** {query}
 
-**ASSISTANT RESPONSE (Follow the rules above):**
-"""
+**YOUR RESPONSE:**"""
+        
         return prompt
 
     async def _generate_with_retry_safe(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
@@ -134,7 +134,7 @@ First, categorize the user's query into one of three types:
                 try:
                     generation_config = genai_sync.types.GenerationConfig(
                         max_output_tokens=max_tokens,
-                        temperature=0.0,
+                        temperature=0.1,  # Slightly increased for more natural responses
                         top_p=0.95,
                         top_k=40
                     )
@@ -163,40 +163,11 @@ First, categorize the user's query into one of three types:
             result = await loop.run_in_executor(executor, sync_generate)
             return result
 
-    async def _generate_with_retry(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
-        """Generate response with retry logic"""
-        
-        for attempt in range(max_retries):
-            try:
-                # IMPROVEMENT: Set temperature to 0.0 for maximum factuality
-                generation_config = genai.types.GenerationConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=0.0,
-                    top_p=0.95,
-                    top_k=40
-                )
-                
-                # IMPROVEMENT: Use the asynchronous version of the call for better performance
-                response = await self.model.generate_content_async(
-                    prompt,
-                    generation_config=generation_config
-                )
-                
-                return response.text
-                
-            except Exception as e:
-                print(f"LLM generation failed on attempt {attempt + 1}: {e}")
-                if attempt == max_retries - 1:
-                    raise e
-                await asyncio.sleep(2 ** attempt)
-        
-        return "Failed to generate response after multiple attempts."
-    
     async def summarize_document(self, chunks: List[Dict[str, Any]]) -> str:
-        """Generate a summary of the entire document"""
+        """Generate a comprehensive summary of the entire document"""
         
-        # Select representative chunks
-        sample_chunks = chunks[:10]  # First 10 chunks for overview
+        # Select representative chunks from throughout the document
+        sample_chunks = chunks[:15]  # Increased for better coverage
         context = self._prepare_context(sample_chunks)
         
         prompt = f"""Analyze the following document content and provide a comprehensive summary:
@@ -204,17 +175,26 @@ First, categorize the user's query into one of three types:
 DOCUMENT CONTENT:
 {context}
 
-Please provide:
-1. Main topics and themes
-2. Key findings or conclusions
-3. Document structure and organization
-4. Important data or statistics mentioned
-5. Any notable images or visual elements referenced
+Please provide a detailed summary including:
 
-Keep the summary concise but informative."""
+1. **Document Overview**: What type of document is this and what is its main purpose?
+
+2. **Key Topics and Themes**: What are the main subjects covered?
+
+3. **Important Findings**: What are the key conclusions, results, or recommendations?
+
+4. **Critical Data**: Any important numbers, statistics, dates, or metrics mentioned
+
+5. **Structure and Organization**: How is the document organized and what are its main sections?
+
+6. **Visual Elements**: Any charts, diagrams, tables, or images referenced
+
+7. **Action Items**: Any next steps, recommendations, or calls to action
+
+Make the summary comprehensive but well-organized and easy to read."""
 
         try:
-            response = await self._generate_with_retry_safe(prompt, 800)
+            response = await self._generate_with_retry_safe(prompt, 1200)
             return response
         except Exception as e:
             return f"Error generating summary: {str(e)}"
@@ -222,78 +202,103 @@ Keep the summary concise but informative."""
     async def extract_key_information(self, chunks: List[Dict[str, Any]], info_type: str = "general") -> Dict[str, Any]:
         """Extract specific types of information from documents"""
         
-        context = self._prepare_context(chunks[:15])  # Use more chunks for extraction
+        context = self._prepare_context(chunks[:20])  # Use more chunks for extraction
         
         if info_type == "financial":
-            prompt = f"""Extract financial information from the following document:
+            prompt = f"""Extract all financial information from the following document:
 
 {context}
 
 Find and extract:
-- Numbers, amounts, percentages
-- Financial terms and metrics
-- Dates related to financial events
-- Company names and financial entities
+- **Monetary amounts**: All dollar amounts, costs, revenues, budgets
+- **Financial metrics**: ROI, profit margins, percentages, ratios
+- **Financial dates**: Fiscal years, reporting periods, deadlines
+- **Financial entities**: Company names, banks, financial institutions
+- **Performance data**: Growth rates, comparisons, trends
+- **Budget items**: Line items, allocations, expenditures
 
-Return the information in a structured format."""
+Format the response with clear categories and specific details."""
 
         elif info_type == "technical":
-            prompt = f"""Extract technical information from the following document:
+            prompt = f"""Extract all technical information from the following document:
 
 {context}
 
 Find and extract:
-- Technical specifications
-- Procedures and processes
-- Equipment or tool names
-- Technical measurements and parameters
-- Safety information
+- **Technical specifications**: Models, versions, capacities, measurements
+- **Procedures and processes**: Step-by-step instructions, workflows
+- **Equipment and tools**: Names, models, specifications
+- **Technical parameters**: Settings, configurations, tolerances
+- **Safety information**: Warnings, precautions, requirements
+- **Standards and compliance**: Regulations, certifications, standards
 
-Return the information in a structured format."""
+Format the response with clear categories and specific technical details."""
 
         else:  # general
-            prompt = f"""Extract key information from the following document:
+            prompt = f"""Extract all key information from the following document:
 
 {context}
 
 Find and extract:
-- Important names, dates, and places
-- Key facts and figures
-- Main conclusions or recommendations
-- Action items or next steps
-- Contact information
+- **Important people**: Names, titles, roles, contact information
+- **Key dates**: Deadlines, milestones, schedules, timelines
+- **Locations**: Addresses, facilities, geographic references
+- **Critical numbers**: Statistics, quantities, measurements, percentages
+- **Main conclusions**: Key findings, recommendations, decisions
+- **Action items**: Tasks, next steps, responsibilities
+- **Contact details**: Phone numbers, emails, addresses
 
-Return the information in a structured format."""
+Format the response with clear categories and comprehensive details."""
 
         try:
-            response = await self._generate_with_retry_safe(prompt, 600)
+            response = await self._generate_with_retry_safe(prompt, 800)
             return {"extracted_info": response, "info_type": info_type}
         except Exception as e:
             return {"error": f"Error extracting information: {str(e)}"}
     
     async def answer_with_reasoning(self, query: str, relevant_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate answer with step-by-step reasoning"""
+        """Generate answer with detailed step-by-step reasoning"""
         
         context = self._prepare_context(relevant_chunks)
         
-        prompt = f"""You are an expert document analyst. Answer the following question with clear reasoning.
+        prompt = f"""You are an expert document analyst. Answer the following question with comprehensive reasoning and analysis.
 
 CONTEXT:
 {context}
 
 QUESTION: {query}
 
-Please provide:
-1. DIRECT ANSWER: A clear, direct answer to the question
-2. REASONING: Step-by-step explanation of how you arrived at the answer
-3. EVIDENCE: Specific quotes or references from the document that support your answer
-4. CONFIDENCE: Rate your confidence in the answer (High/Medium/Low) and explain why
-5. LIMITATIONS: Any limitations or assumptions in your answer
+Please provide a detailed analysis with these sections:
 
-Format your response clearly with these sections."""
+**1. DIRECT ANSWER:**
+Provide a clear, direct answer to the question.
+
+**2. DETAILED REASONING:**
+Explain step-by-step how you arrived at this answer, including:
+- What information you found in the documents
+- How different pieces of information connect
+- Any patterns or trends you identified
+- Logical deductions made from the evidence
+
+**3. SUPPORTING EVIDENCE:**
+List specific quotes, data points, or references from the document that support your answer.
+
+**4. CONFIDENCE ASSESSMENT:**
+Rate your confidence level (High/Medium/Low) and explain:
+- Why you have this confidence level
+- What factors support or limit your certainty
+- Any assumptions you had to make
+
+**5. ADDITIONAL INSIGHTS:**
+Any related information, context, or implications that might be valuable.
+
+**6. LIMITATIONS:**
+Any gaps in the available information or limitations in your analysis.
+
+Format your response clearly with these sections for easy reading."""
 
         try:
-            response = await self._generate_with_retry_safe(prompt, 1200)
+            response = await self._generate_with_retry_safe(prompt, 1500)
             
             # Parse the structured response
             sections = self._parse_structured_response(response)
@@ -308,15 +313,16 @@ Format your response clearly with these sections."""
             return {"error": f"Error generating reasoned response: {str(e)}"}
     
     def _parse_structured_response(self, response: str) -> Dict[str, str]:
-        """Parse structured response into sections"""
+        """Parse structured response into sections with improved regex patterns"""
         sections = {}
         
         patterns = {
-            "direct_answer": r"(?:DIRECT ANSWER|1\..*?):(.*?)(?=(?:REASONING|2\.)|$)",
-            "reasoning": r"(?:REASONING|2\..*?):(.*?)(?=(?:EVIDENCE|3\.)|$)",
-            "evidence": r"(?:EVIDENCE|3\..*?):(.*?)(?=(?:CONFIDENCE|4\.)|$)",
-            "confidence": r"(?:CONFIDENCE|4\..*?):(.*?)(?=(?:LIMITATIONS|5\.)|$)",
-            "limitations": r"(?:LIMITATIONS|5\..*?):(.*?)$"
+            "direct_answer": r"(?:\*\*1\.\s*DIRECT ANSWER:\*\*|1\.\s*DIRECT ANSWER|DIRECT ANSWER)\s*:?\s*(.*?)(?=\*\*2\.|2\.|$)",
+            "reasoning": r"(?:\*\*2\.\s*DETAILED REASONING:\*\*|2\.\s*DETAILED REASONING|DETAILED REASONING)\s*:?\s*(.*?)(?=\*\*3\.|3\.|$)",
+            "evidence": r"(?:\*\*3\.\s*SUPPORTING EVIDENCE:\*\*|3\.\s*SUPPORTING EVIDENCE|SUPPORTING EVIDENCE)\s*:?\s*(.*?)(?=\*\*4\.|4\.|$)",
+            "confidence": r"(?:\*\*4\.\s*CONFIDENCE ASSESSMENT:\*\*|4\.\s*CONFIDENCE ASSESSMENT|CONFIDENCE ASSESSMENT)\s*:?\s*(.*?)(?=\*\*5\.|5\.|$)",
+            "insights": r"(?:\*\*5\.\s*ADDITIONAL INSIGHTS:\*\*|5\.\s*ADDITIONAL INSIGHTS|ADDITIONAL INSIGHTS)\s*:?\s*(.*?)(?=\*\*6\.|6\.|$)",
+            "limitations": r"(?:\*\*6\.\s*LIMITATIONS:\*\*|6\.\s*LIMITATIONS|LIMITATIONS)\s*:?\s*(.*?)$"
         }
         
         for key, pattern in patterns.items():
