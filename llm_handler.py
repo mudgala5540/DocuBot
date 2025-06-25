@@ -1,3 +1,6 @@
+# You can remove the print statement below after you confirm it works
+print("--- LOADING THE CORRECT LLM_HANDLER.PY FILE (VERSION 3) ---")
+
 import google.generativeai as genai
 import os
 import asyncio
@@ -5,7 +8,7 @@ import json
 import re
 from datetime import datetime
 import threading
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 class LLMHandler:
     def __init__(self):
@@ -29,10 +32,8 @@ class LLMHandler:
         if not chunks:
             return "No relevant context found."
         
-        # Chunks should already be sorted by similarity score
         context_parts = []
         total_length = 0
-        # Gemini 1.5 Flash has a large context window, we can be generous
         max_context_length = 32000 
 
         for chunk in chunks:
@@ -47,8 +48,7 @@ class LLMHandler:
     def _create_agentic_prompt(self, query: str, context: str) -> str:
         """
         A highly structured, agentic prompt that forces the LLM to classify the query,
-        think step-by-step, and provide a structured JSON response. This is the core
-        of the agent's intelligence.
+        think step-by-step, and provide a structured JSON response.
         """
         return f"""
 You are IntelliDoc Agent, an expert AI assistant for document analysis. Your task is to analyze user queries and respond based *only* on the provided document context.
@@ -95,7 +95,7 @@ async def _generate_with_retry(self, prompt: str, max_retries: int = 3) -> genai
     """Internal generation function with retry logic."""
     loop = asyncio.get_running_loop()
     
-    def sync_generate():
+    async def sync_generate_in_executor():
         # This synchronous function will be run in a thread pool executor
         last_exception = None
         for attempt in range(max_retries):
@@ -113,11 +113,11 @@ async def _generate_with_retry(self, prompt: str, max_retries: int = 3) -> genai
             except Exception as e:
                 last_exception = e
                 print(f"LLM generation failed on attempt {attempt + 1}: {e}")
-                asyncio.sleep(2 ** attempt) # Exponential backoff
+                await asyncio.sleep(2 ** attempt) # Exponential backoff
         raise last_exception
 
     # Run the synchronous SDK call in an executor to avoid blocking the event loop
-    return await loop.run_in_executor(None, sync_generate)
+    return await loop.run_in_executor(None, sync_generate_in_executor)
 
 
 async def get_agentic_response(self, query: str, relevant_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -130,16 +130,13 @@ async def get_agentic_response(self, query: str, relevant_chunks: List[Dict[str,
     try:
         response = await self._generate_with_retry(prompt)
         
-        # Update token usage stats
         with self._lock:
             self.requests_made += 1
             if response.usage_metadata:
                 self.total_input_tokens += response.usage_metadata.prompt_token_count
                 self.total_output_tokens += response.usage_metadata.candidate_token_count
 
-        # Clean and parse the JSON response
         raw_text = response.text.strip()
-        # The Gemini API can sometimes wrap the JSON in ```json ... ```, so we clean it.
         clean_text = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.DOTALL)
         parsed_response = json.loads(clean_text)
         
@@ -147,7 +144,6 @@ async def get_agentic_response(self, query: str, relevant_chunks: List[Dict[str,
 
     except Exception as e:
         print(f"Error generating or parsing LLM response: {e}")
-        # Return a fallback error structure
         return {
             "query_type": "ERROR",
             "thought_process": f"An error occurred: {str(e)}",
@@ -155,7 +151,6 @@ async def get_agentic_response(self, query: str, relevant_chunks: List[Dict[str,
             "cited_pages": []
         }
 
-# <--- METHOD RESTORED HERE
 def get_usage_stats(self) -> Dict[str, Any]:
     """Get usage statistics for cost monitoring."""
     with self._lock:
@@ -166,3 +161,4 @@ def get_usage_stats(self) -> Dict[str, Any]:
             "model_used": self.model.model_name,
             "last_request_time": datetime.now().isoformat()
         }
+        
