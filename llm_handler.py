@@ -84,6 +84,7 @@ You MUST respond with a single, valid JSON object. Do not add any text before or
     // Leave empty if the query is not a DOCUMENT_QUERY or no specific page was used.
   ]
 }}
+
 DOCUMENT CONTEXT:
 {context}
 USER QUERY: {query}
@@ -154,6 +155,7 @@ async def get_agentic_response(self, query: str, relevant_chunks: List[Dict[str,
             "cited_pages": []
         }
 
+# <--- METHOD RESTORED HERE
 def get_usage_stats(self) -> Dict[str, Any]:
     """Get usage statistics for cost monitoring."""
     with self._lock:
