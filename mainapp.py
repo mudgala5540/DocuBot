@@ -1,3 +1,5 @@
+# mainapp.py - TEMPORARY VERSION TO BYPASS CACHE ERROR
+
 import streamlit as st
 import os
 import tempfile
@@ -9,7 +11,6 @@ from vector_store import VectorStore
 from llm_handler import LLMHandler
 from image_processor import ImageProcessor
 import nest_asyncio
-# --- THE FIX IS HERE ---
 from typing import List, Dict, Any, Tuple
 
 # Apply the patch for nested asyncio event loops. CRITICAL for Streamlit.
@@ -27,10 +28,6 @@ st.set_page_config(
 
 # --- Robust Asyncio Runner for Streamlit ---
 def run_async(coro):
-    """
-    A robust way to run an async coroutine from a sync context like Streamlit.
-    It ensures we're using the same, patched event loop.
-    """
     loop = asyncio.get_event_loop()
     return loop.run_until_complete(coro)
 
@@ -55,12 +52,10 @@ class PDFAgent:
                 tmp_path = tmp_file.name
             
             try:
-                # Process PDF in parallel
                 text_chunks_task = self.pdf_processor.extract_text_chunks(tmp_path)
                 images_task = self.pdf_processor.extract_images(tmp_path)
                 text_chunks, images = await asyncio.gather(text_chunks_task, images_task)
 
-                # Process extracted images with OCR and analysis
                 image_processing_tasks = []
                 for img_data in images:
                     image_processing_tasks.append(self.process_single_image(img_data))
@@ -80,7 +75,6 @@ class PDFAgent:
         return all_chunks, all_images
 
     async def process_single_image(self, img_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Helper to process one image with OCR and analysis."""
         try:
             ocr_text, analysis = await asyncio.gather(
                 self.image_processor.extract_text_from_image(img_data['image']),
@@ -105,52 +99,39 @@ def find_relevant_images(
     all_images: List[Dict[str, Any]], 
     source_chunks: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """
-    Intelligently finds relevant images based on cited pages, query, and response content.
-    This is a critical function for achieving the user's goal.
-    """
     if not all_images or llm_response["query_type"] != "DOCUMENT_QUERY":
         return []
 
     cited_pages = llm_response.get("cited_pages", [])
-    # If LLM didn't cite pages, infer from the retrieved chunks
     if not cited_pages and source_chunks:
         cited_pages = sorted(list(set(chunk.get('page', 0) for chunk in source_chunks)))
     
     if not cited_pages:
         return []
 
-    # Get keywords from query and response for better matching
     query_and_response = llm_response["response_text"]
-    search_words = set(re.findall(r'\b\w{4,}\b', query_and_response.lower())) # Words with 4+ chars
+    search_words = set(re.findall(r'\b\w{4,}\b', query_and_response.lower()))
 
     scored_images = []
     for img in all_images:
-        # Must be on a cited page
         if img.get('page') not in cited_pages:
             continue
 
-        score = 0
-        # Base score for being on a cited page
-        score += 5.0
-
-        # Score based on OCR text match
+        score = 5.0
         if img.get("ocr_text"):
             ocr_words = set(img["ocr_text"].split())
             matches = search_words.intersection(ocr_words)
             if matches:
                 score += len(matches) * 2.0
-
-        # Score for being a chart or diagram if query mentions data/trends
+        
         analysis = img.get("analysis", {})
         if analysis.get('likely_chart_or_diagram'):
             data_keywords = {"chart", "graph", "data", "figure", "table", "percent", "trend"}
             if search_words.intersection(data_keywords):
                 score += 10.0
             else:
-                score += 3.0 # Still valuable
+                score += 3.0
         
-        # Bonus for high-quality images
         if analysis.get('image_quality') == 'high':
             score += 2.0
 
@@ -158,7 +139,6 @@ def find_relevant_images(
         img_copy['relevance_score'] = round(score, 1)
         scored_images.append(img_copy)
 
-    # Sort by score and return all images that have a base score (i.e., are on a cited page)
     scored_images.sort(key=lambda x: x['relevance_score'], reverse=True)
     return scored_images
 
@@ -211,14 +191,12 @@ def main():
             with st.expander("📊 Usage Stats"):
                 stats = st.session_state.agent.llm_handler.get_usage_stats()
                 st.json(stats)
-
         st.markdown("---")
         if st.button("🗑️ Clear Session", use_container_width=True):
             for key in list(st.session_state.keys()): 
                 del st.session_state[key]
             st.rerun()
 
-    # Main chat area
     if not st.session_state.processed_files:
         st.info("Welcome! Please upload your PDF documents in the sidebar to get started.")
     
@@ -233,7 +211,6 @@ def main():
             
             if "images" in message and message["images"]:
                 st.markdown("**🖼️ Relevant Images**")
-                # Display all relevant images in a responsive grid
                 cols = st.columns(3)
                 for i, img_data in enumerate(message["images"]):
                     with cols[i % 3]:
@@ -243,7 +220,6 @@ def main():
                             use_container_width=True
                         )
 
-    # Chat input
     if query := st.chat_input("Ask a question about your documents..."):
         if not st.session_state.processed_files:
             st.warning("Please upload and process documents before asking questions.")
@@ -256,7 +232,6 @@ def main():
                 try:
                     llm_response, sources = run_async(st.session_state.agent.query_agent(query))
                     
-                    # This is the key logic: use the structured response to build the UI
                     response_text = llm_response.get("response_text", "I'm sorry, I couldn't generate a valid response.")
                     
                     images_to_display = []
