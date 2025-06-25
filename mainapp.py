@@ -2,13 +2,15 @@ import streamlit as st
 import os
 import tempfile
 import asyncio
+import re
 from dotenv import load_dotenv
 from pdf_processor import PDFProcessor
 from vector_store import VectorStore
 from llm_handler import LLMHandler
 from image_processor import ImageProcessor
 import nest_asyncio
-from typing import List, Dict, Any
+# --- THE FIX IS HERE ---
+from typing import List, Dict, Any, Tuple
 
 # Apply the patch for nested asyncio event loops. CRITICAL for Streamlit.
 nest_asyncio.apply()
