@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import re
+import os # <--- THE FIX IS HERE
 
 class PDFProcessor:
     def __init__(self):
