@@ -27,7 +27,7 @@ class LLMHandler:
         self._lock = threading.Lock()
         self.response_cache = {}
         self.last_request_time = 0
-        self.min_request_interval = 0.5  # Reduced for better performance
+        self.min_request_interval = 0.5
     
     def sanitize_response(self, response: str) -> str:
         """Remove internal processing messages from response."""
@@ -77,12 +77,13 @@ class LLMHandler:
             logger.warning("No chunks provided for context")
             return "No relevant context found."
         
-        chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+        # Prioritize chunks with more content
+        chunks.sort(key=lambda x: (x.get('similarity_score', 0), len(x['text'])), reverse=True)
         context_parts = []
         total_length = 0
         max_context_length = 30000
         
-        for chunk in chunks[:50]:  # Increased to ensure broader coverage
+        for chunk in chunks[:50]:
             chunk_text = f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}\n"
             if total_length + len(chunk_text) > max_context_length:
                 break
@@ -136,7 +137,18 @@ class LLMHandler:
                         top_k=40
                     )
                     response = model_sync.generate_content(prompt, generation_config=generation_config)
-                    self.total_tokens_used += getattr(response, 'usage_metadata', {}).get('total_tokens', 0)
+                    # Safely handle usage_metadata
+                    try:
+                        usage_metadata = getattr(response, 'usage_metadata', None)
+                        if usage_metadata and hasattr(usage_metadata, 'prompt_token_count') and hasattr(usage_metadata, 'candidates_token_count'):
+                            tokens_used = (usage_metadata.prompt_token_count or 0) + (usage_metadata.candidates_token_count or 0)
+                            self.total_tokens_used += tokens_used
+                        else:
+                            logger.warning("usage_metadata missing or incomplete in API response")
+                            self.total_tokens_used += 0  # Fallback to avoid errors
+                    except Exception as e:
+                        logger.error(f"Error accessing usage_metadata: {str(e)}")
+                        self.total_tokens_used += 0
                     return response.text
                 except Exception as e:
                     logger.error(f"LLM generation failed on attempt {attempt + 1}: {str(e)}")
@@ -159,17 +171,17 @@ class LLMHandler:
             logger.warning("No chunks provided for summarization")
             return self.sanitize_response("No document content available for summarization. Please upload a valid document.")
         
-        # Improved chunk sampling for better coverage
+        # Enhanced chunk sampling: prioritize longer, denser chunks
         total_chunks = len(chunks)
         sample_size = min(100, max(20, total_chunks // 2))
         step = max(1, total_chunks // sample_size)
         sampled_chunks = []
         for i in range(0, total_chunks, step):
-            if i < len(chunks):
+            if i < len(chunks) and len(chunks[i]['text'].strip()) > 50:  # Only include chunks with significant content
                 sampled_chunks.append(chunks[i])
         sampled_chunks = sampled_chunks[:sample_size]
         
-        if len(sampled_chunks) < 3:  # Lowered threshold to attempt partial summaries
+        if len(sampled_chunks) < 3:
             logger.warning(f"Very limited chunks ({len(sampled_chunks)}) for summarization")
             basic_context = "\n".join([f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}" for chunk in sampled_chunks])
             basic_prompt = f"""Summarize the document based on limited content:
@@ -189,14 +201,14 @@ class LLMHandler:
 # Document Summary
 
 ## Overview
-[Brief description of document type and purpose]
+[Brief description of document type and purpose, or state limited content]
 
 ## Key Topics
-- [Topic 1]
-- [Topic 2]
+- [Topic 1, if any]
+- [Topic 2, if any]
 
 ## Limitations
-[Note any limitations due to insufficient content]
+[Note limitations due to insufficient content]
 ```
 """
             try:
