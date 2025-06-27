@@ -1,3 +1,8 @@
+
+---
+
+### `mainapp.py`
+```python
 import streamlit as st
 import os
 import tempfile
@@ -13,7 +18,7 @@ import nest_asyncio
 import logging
 import hashlib
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 nest_asyncio.apply()
@@ -46,6 +51,16 @@ def run_async(coro):
             return future.result()
     else:
         return loop.run_until_complete(coro)
+
+def sanitize_response(response: str) -> str:
+    """Remove internal processing messages from response"""
+    unwanted_phrases = [
+        r"STEP \d+:", r"thinking", r"processing", r"query classification",
+        r"internal error", r"debug:", r"agentic prompt"
+    ]
+    for phrase in unwanted_phrases:
+        response = re.sub(phrase, "", response, flags=re.IGNORECASE)
+    return response.strip()
 
 class PDFAgent:
     def __init__(self, cache_dir: str = ".cache"):
@@ -135,7 +150,7 @@ class PDFAgent:
             return response, relevant_chunks
         except Exception as e:
             logger.error(f"Error querying documents: {e}")
-            return f"Error querying documents: {str(e)}", []
+            return self.llm_handler.sanitize_response(f"Error querying documents: {str(e)}"), []
 
 def parse_source_pages(response_text: str) -> list[int]:
     pages = []
@@ -396,7 +411,7 @@ def main():
                                     use_container_width=True
                                 )
                                 if img.get('ocr_text') and len(img['ocr_text'].strip()) > 10:
-                                    with st.expander(f"📝 Text from Page {img['page']}"):
+                                    with st.expander(f"� rašText from Page {img['page']}"):
                                         st.text(img['ocr_text'][:400] + "..." if len(img['ocr_text']) > 400 else img['ocr_text'])
                                 if img.get('tables'):
                                     with st.expander(f"📊 Tables from Page {img['page']}"):
@@ -409,7 +424,7 @@ def main():
             
             try:
                 if st.session_state.processed_files:
-                    if query.lower().strip() in ["what is this document about", "summarize document", "document summary"]:
+                    if query.lower().strip() in ["what is this document about", "summarize document", "document summary", "tell me more about the document"]:
                         if st.session_state.summary:
                             response_text = st.session_state.summary
                             sources = []
@@ -428,6 +443,7 @@ def main():
                         response_text = "I need documents to be uploaded first before I can answer questions about them. Please use the sidebar to upload your PDF documents."
                         sources = []
                 
+                response_text = sanitize_response(response_text)
                 is_doc_related = is_query_document_related(query, response_text)
                 images_to_display = []
                 if is_doc_related and st.session_state.images:
@@ -448,7 +464,7 @@ def main():
                 st.error(f"A critical error occurred: {e}")
                 assistant_message = {
                     "role": "assistant",
-                    "content": f"I'm sorry, I encountered an error: {e}",
+                    "content": sanitize_response(f"I'm sorry, I encountered an error: {e}"),
                     "error": True
                 }
             

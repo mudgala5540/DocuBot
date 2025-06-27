@@ -10,7 +10,7 @@ import logging
 import hashlib
 import time
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class LLMHandler:
@@ -28,22 +28,31 @@ class LLMHandler:
         self.last_request_time = 0
         self.min_request_interval = 1.0  # Seconds between requests
     
+    def sanitize_response(self, response: str) -> str:
+        """Remove internal processing messages from response"""
+        unwanted_phrases = [
+            r"STEP \d+:", r"thinking", r"processing", r"query classification",
+            r"internal error", r"debug:", r"agentic prompt"
+        ]
+        for phrase in unwanted_phrases:
+            response = re.sub(phrase, "", response, flags=re.IGNORECASE)
+        return response.strip()
+    
     async def generate_response(self, query: str, relevant_chunks: List[Dict[str, Any]], max_tokens: int = 2000) -> str:
         """Generate response using relevant document chunks"""
         if not query.strip():
             logger.warning("Empty query provided")
-            return "Please provide a valid query."
+            return self.sanitize_response("Please provide a valid query.")
         
         cache_key = hashlib.md5((query + json.dumps(relevant_chunks)).encode()).hexdigest()
         if cache_key in self.response_cache:
             logger.info(f"Returning cached response for query: {query}")
-            return self.response_cache[cache_key]
+            return self.sanitize_response(self.response_cache[cache_key])
         
         context = self._prepare_context(relevant_chunks)
         prompt = self._create_enhanced_agentic_prompt(query, context)
         
         try:
-            # Rate limiting
             with self._lock:
                 current_time = time.time()
                 if current_time - self.last_request_time < self.min_request_interval:
@@ -54,10 +63,10 @@ class LLMHandler:
             response = await self._generate_with_retry_safe(prompt, max_tokens)
             self.response_cache[cache_key] = response
             logger.info(f"Generated response for query: {query}")
-            return response
+            return self.sanitize_response(response)
         except Exception as e:
             logger.error(f"Error generating response: {e}")
-            return f"Error generating response: {str(e)}"
+            return self.sanitize_response(f"Error generating response: {str(e)}")
     
     def _prepare_context(self, chunks: List[Dict[str, Any]]) -> str:
         """Prepare context with prioritized chunks"""
@@ -68,7 +77,7 @@ class LLMHandler:
         chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
         context_parts = []
         total_length = 0
-        max_context_length = 25000  # Increased for larger documents
+        max_context_length = 25000
         
         for chunk in chunks[:30]:
             chunk_text = f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}\n"
@@ -83,30 +92,35 @@ class LLMHandler:
         """Enhanced prompt for consistent and accurate responses"""
         prompt = f"""You are IntelliDoc Agent, a professional document analysis AI. Your role is to provide accurate, detailed, and well-structured responses based solely on the provided document context.
 
-**Query Processing Steps:**
-1. **Query Classification**:
-   - Identify if the query is a greeting (e.g., "hi", "hello"), irrelevant/nonsense (e.g., "asdf", "weather"), or document-related.
-2. **Response Strategy**:
-   - For greetings: Respond politely without using document context (e.g., "Hello! How can I assist you with your documents?").
-   - For irrelevant/nonsense: Redirect to document-related topics (e.g., "I specialize in document analysis. Please ask about your uploaded documents.").
-   - For document queries: Provide a detailed answer using only the context, including specific details, bullet points, and source citations.
-
 **DOCUMENT CONTEXT:**
 {context}
 
 **USER QUERY:** {query}
 
+**INSTRUCTIONS:**
+- Provide a clear, concise, and comprehensive answer in markdown format.
+- Use bullet points or numbered lists for structured details where appropriate.
+- Cite specific page numbers for all referenced information (e.g., Source: Page 1).
+- If the query is a greeting (e.g., "hi", "hello"), respond politely without using document context (e.g., "Hello! How can I assist you with your documents?").
+- If the query is irrelevant or nonsense (e.g., "asdf", "weather"), redirect to document-related topics (e.g., "I specialize in document analysis. Please ask about your uploaded documents.").
+- Do not include internal processing steps or terms like "STEP", "thinking", or "query classification" in the response.
+- If no relevant information is found, state: "No relevant information found in the provided context."
+
 **RESPONSE FORMAT:**
-- **Answer**: [Direct and concise answer to the query]
-- **Details**: [Comprehensive explanation with bullet points if applicable]
-- **Source**: [List all page numbers referenced, e.g., (Source: Page 1, Page 3)]
+```markdown
+# Response Title
+
+- **Section 1**: [Details with bullet points]
+- **Section 2**: [Details with bullet points]
+- **Source**: [Page numbers]
+```
 """
         return prompt
 
     async def _generate_with_retry_safe(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
         """Generate response with retry logic"""
         def sync_generate():
-            genai_sync = genai  # Avoid re-importing
+            genai_sync = genai
             genai_sync.configure(api_key=self.api_key)
             model_sync = genai_sync.GenerativeModel('gemini-1.5-flash')
             
@@ -135,21 +149,33 @@ class LLMHandler:
         """Generate a comprehensive summary of the entire document"""
         if not chunks:
             logger.warning("No chunks provided for summarization")
-            return "No document content available for summarization. Please upload a valid document."
+            return self.sanitize_response("No document content available for summarization. Please upload a valid document.")
         
-        # Dynamic chunk sampling based on document length
         total_chunks = len(chunks)
-        sample_size = min(50, max(10, total_chunks // 2))  # Dynamic sample size
+        sample_size = min(50, max(10, total_chunks // 2))
         step = max(1, total_chunks // sample_size)
         sampled_chunks = chunks[::step][:sample_size]
         
         if len(sampled_chunks) < 5:
             logger.warning(f"Insufficient chunks ({len(sampled_chunks)}) for comprehensive summary")
-            return "Insufficient content to generate a meaningful summary. The document may be too short or contain insufficient text."
+            basic_context = "\n".join([f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}" for chunk in sampled_chunks])
+            basic_prompt = f"""Summarize the document based on limited content:
+    
+    **CONTENT:**
+    {basic_context}
+    
+    **INSTRUCTIONS:**
+    Provide a brief summary in markdown format, focusing on any available information. If insufficient, note limitations. Do not include internal processing steps or terms like "STEP" or "thinking".
+    """
+            try:
+                return await self._generate_with_retry_safe(basic_prompt, 1000)
+            except Exception as e:
+                logger.error(f"Error generating basic summary: {e}")
+                return self.sanitize_response(f"Error generating summary: {str(e)}. Document may have insufficient content.")
         
         image_context = ""
         if image_data:
-            for img in image_data[:15]:  # Increased limit for images
+            for img in image_data[:20]:
                 if img.get('ocr_text') or img.get('tables'):
                     image_context += f"[PAGE {img['page']}]\n"
                     if img.get('ocr_text'):
@@ -165,7 +191,7 @@ class LLMHandler:
 {context}
 
 **INSTRUCTIONS:**
-Provide a detailed summary with the following sections:
+Provide a detailed summary in markdown format with the following sections:
 1. **Overview**: Describe the document type and its primary purpose.
 2. **Key Topics**: List the main subjects or themes covered.
 3. **Critical Findings**: Highlight key conclusions, results, or recommendations.
@@ -173,24 +199,47 @@ Provide a detailed summary with the following sections:
 5. **Structure**: Describe the document's organization and main sections.
 6. **Visual Elements**: Summarize any charts, tables, or images (if provided).
 7. **Action Items**: Note any next steps or recommendations.
-
-**FORMATTING:**
 - Use clear markdown headings for each section.
 - Use bullet points for key details.
-- Cite page numbers for all referenced information.
+- Cite page numbers for all referenced information (e.g., Source: Page 1).
 - If information is missing, state: "No relevant information found in the provided context."
+- Do not include internal processing steps or terms like "STEP" or "thinking".
 - Ensure all sections are addressed, even if briefly, to maintain consistency.
 
 **OUTPUT:**
-Provide a concise yet comprehensive summary in markdown format.
+```markdown
+# Document Summary
+
+## Overview
+...
+
+## Key Topics
+...
+
+## Critical Findings
+...
+
+## Important Data
+...
+
+## Structure
+...
+
+## Visual Elements
+...
+
+## Action Items
+...
+```
 """
         try:
             response = await self._generate_with_retry_safe(prompt, 2500)
             logger.info("Document summary generated successfully")
-            return response
+            return self.sanitize_response(response)
         except Exception as e:
             logger.error(f"Error generating summary: {e}")
-            return f"Error generating summary: {str(e)}. Please try re-uploading the document or contact support."
+            basic_response = await self._generate_with_retry_safe(basic_prompt, 1000)
+            return self.sanitize_response(basic_response)
     
     async def extract_key_information(self, chunks: List[Dict[str, Any]], info_type: str = "general") -> Dict[str, Any]:
         """Extract specific types of information from documents"""
@@ -213,7 +262,7 @@ Provide a concise yet comprehensive summary in markdown format.
 - Performance data (e.g., growth rates, trends)
 - Budget items (e.g., allocations, expenditures)
 
-**Format**: Use markdown with clear categories and citations."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
         elif info_type == "technical":
             prompt = f"""Extract technical information from the document:
 
@@ -227,7 +276,7 @@ Provide a concise yet comprehensive summary in markdown format.
 - Safety information (e.g., warnings)
 - Standards/compliance (e.g., regulations)
 
-**Format**: Use markdown with clear categories and citations."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
         else:
             prompt = f"""Extract key information from the document:
 
@@ -242,15 +291,15 @@ Provide a concise yet comprehensive summary in markdown format.
 - Action items (e.g., tasks, responsibilities)
 - Contact details (e.g., emails, phone numbers)
 
-**Format**: Use markdown with clear categories and citations."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
         
         try:
             response = await self._generate_with_retry_safe(prompt, 1500)
             logger.info(f"Extracted {info_type} information successfully")
-            return {"extracted_info": response, "info_type": info_type}
+            return {"extracted_info": self.sanitize_response(response), "info_type": info_type}
         except Exception as e:
             logger.error(f"Error extracting information: {e}")
-            return {"error": f"Error extracting information: {str(e)}"}
+            return {"error": self.sanitize_response(f"Error extracting information: {str(e)}")}
     
     async def answer_with_reasoning(self, query: str, relevant_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate answer with detailed reasoning"""
@@ -268,26 +317,31 @@ Provide a concise yet comprehensive summary in markdown format.
 **QUESTION:** {query}
 
 **RESPONSE FORMAT:**
+```markdown
+# Response
+
 - **Direct Answer**: [Concise answer]
 - **Reasoning**: [Step-by-step explanation]
 - **Evidence**: [Specific quotes or data with page citations]
 - **Confidence**: [High/Medium/Low with explanation]
 - **Insights**: [Additional relevant information]
 - **Limitations**: [Gaps or constraints in the analysis]
+```
+- Do not include internal processing steps or terms like "STEP" or "thinking".
 """
         try:
             response = await self._generate_with_retry_safe(prompt, 2000)
             sections = self._parse_structured_response(response)
             logger.info(f"Generated reasoned response for query: {query}")
             return {
-                "answer": response,
+                "answer": self.sanitize_response(response),
                 "structured_response": sections,
                 "query": query,
                 "sources_used": len(relevant_chunks)
             }
         except Exception as e:
             logger.error(f"Error generating reasoned response: {e}")
-            return {"error": f"Error generating reasoned response: {str(e)}"}
+            return {"error": self.sanitize_response(f"Error generating reasoned response: {str(e)}")}
     
     def _parse_structured_response(self, response: str) -> Dict[str, str]:
         """Parse structured response into sections"""
@@ -327,7 +381,7 @@ Provide a concise yet comprehensive summary in markdown format.
                 response = await self.generate_response(query, relevant_chunks, max_tokens=500)
                 results.append({
                     "query": query,
-                    "response": response,
+                    "response": self.sanitize_response(response),
                     "status": "success"
                 })
             except Exception as e:
@@ -336,7 +390,7 @@ Provide a concise yet comprehensive summary in markdown format.
                     "query": query,
                     "response": None,
                     "status": "error",
-                    "error": str(e)
+                    "error": self.sanitize_response(str(e))
                 })
             await asyncio.sleep(self.min_request_interval)
         return results
