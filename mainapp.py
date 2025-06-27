@@ -52,7 +52,7 @@ def sanitize_response(response: str) -> str:
     """Remove internal processing messages from response."""
     unwanted_phrases = [
         r"STEP \d+:", r"thinking", r"processing", r"query classification",
-        r"internal error", r"debug:", r"agentic prompt"
+        r"internal error", r"debug:", r"agentic prompt", r"Thought:"
     ]
     for phrase in unwanted_phrases:
         response = re.sub(phrase, "", response, flags=re.IGNORECASE)

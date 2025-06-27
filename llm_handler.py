@@ -9,6 +9,7 @@ import threading
 import logging
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class LLMHandler:
         """Remove internal processing messages from response"""
         unwanted_phrases = [
             r"STEP \d+:", r"thinking", r"processing", r"query classification",
-            r"internal error", r"debug:", r"agentic prompt"
+            r"internal error", r"debug:", r"agentic prompt", r"Thought:"
         ]
         for phrase in unwanted_phrases:
             response = re.sub(phrase, "", response, flags=re.IGNORECASE)
@@ -103,7 +104,7 @@ class LLMHandler:
 - Cite specific page numbers for all referenced information (e.g., Source: Page 1).
 - If the query is a greeting (e.g., "hi", "hello"), respond politely without using document context (e.g., "Hello! How can I assist you with your documents?").
 - If the query is irrelevant or nonsense (e.g., "asdf", "weather"), redirect to document-related topics (e.g., "I specialize in document analysis. Please ask about your uploaded documents.").
-- Do not include internal processing steps or terms like "STEP", "thinking", or "query classification" in the response.
+- Do not include internal processing steps or terms like "STEP", "thinking", "Thought", or "query classification" in the response.
 - If no relevant information is found, state: "No relevant information found in the provided context."
 
 **RESPONSE FORMAT:**
@@ -165,7 +166,7 @@ class LLMHandler:
     {basic_context}
     
     **INSTRUCTIONS:**
-    Provide a brief summary in markdown format, focusing on any available information. If insufficient, note limitations. Do not include internal processing steps or terms like "STEP" or "thinking".
+    Provide a brief summary in markdown format, focusing on any available information. If insufficient, note limitations. Do not include internal processing steps or terms like "STEP", "thinking", or "Thought".
     """
             try:
                 return await self._generate_with_retry_safe(basic_prompt, 1000)
@@ -203,7 +204,7 @@ Provide a detailed summary in markdown format with the following sections:
 - Use bullet points for key details.
 - Cite page numbers for all referenced information (e.g., Source: Page 1).
 - If information is missing, state: "No relevant information found in the provided context."
-- Do not include internal processing steps or terms like "STEP" or "thinking".
+- Do not include internal processing steps or terms like "STEP", "thinking", or "Thought".
 - Ensure all sections are addressed, even if briefly, to maintain consistency.
 
 **OUTPUT:**
@@ -262,7 +263,7 @@ Provide a detailed summary in markdown format with the following sections:
 - Performance data (e.g., growth rates, trends)
 - Budget items (e.g., allocations, expenditures)
 
-**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps or terms like "STEP" or "Thought"."""
         elif info_type == "technical":
             prompt = f"""Extract technical information from the document:
 
@@ -276,7 +277,7 @@ Provide a detailed summary in markdown format with the following sections:
 - Safety information (e.g., warnings)
 - Standards/compliance (e.g., regulations)
 
-**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps or terms like "STEP" or "Thought"."""
         else:
             prompt = f"""Extract key information from the document:
 
@@ -291,7 +292,7 @@ Provide a detailed summary in markdown format with the following sections:
 - Action items (e.g., tasks, responsibilities)
 - Contact details (e.g., emails, phone numbers)
 
-**Format**: Use markdown with clear categories and citations. Do not include internal processing steps."""
+**Format**: Use markdown with clear categories and citations. Do not include internal processing steps or terms like "STEP" or "Thought"."""
         
         try:
             response = await self._generate_with_retry_safe(prompt, 1500)
@@ -327,7 +328,7 @@ Provide a detailed summary in markdown format with the following sections:
 - **Insights**: [Additional relevant information]
 - **Limitations**: [Gaps or constraints in the analysis]
 ```
-- Do not include internal processing steps or terms like "STEP" or "thinking".
+- Do not include internal processing steps or terms like "STEP", "thinking", or "Thought".
 """
         try:
             response = await self._generate_with_retry_safe(prompt, 2000)
