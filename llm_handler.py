@@ -169,17 +169,36 @@ class LLMHandler:
                 sampled_chunks.append(chunks[i])
         sampled_chunks = sampled_chunks[:sample_size]
         
-        if len(sampled_chunks) < 5:
-            logger.warning(f"Insufficient chunks ({len(sampled_chunks)}) for comprehensive summary")
+        if len(sampled_chunks) < 3:  # Lowered threshold to attempt partial summaries
+            logger.warning(f"Very limited chunks ({len(sampled_chunks)}) for summarization")
             basic_context = "\n".join([f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}" for chunk in sampled_chunks])
             basic_prompt = f"""Summarize the document based on limited content:
-    
-    **CONTENT:**
-    {basic_context}
-    
-    **INSTRUCTIONS:**
-    Provide a brief summary in markdown format, focusing on any available information. If insufficient, note limitations. Do not include internal processing steps or terms like "STEP", "thinking", or "Thought".
-    """
+
+**CONTENT:**
+{basic_context}
+
+**INSTRUCTIONS:**
+- Provide a brief summary in markdown format, focusing on any available information.
+- Note limitations if the content is insufficient.
+- Use clear markdown headings for Overview, Key Topics, and Limitations.
+- Do not include internal processing steps or terms like "STEP", "thinking", or "Thought".
+- If no meaningful information is available, state: "Insufficient content to generate a meaningful summary."
+
+**OUTPUT:**
+```markdown
+# Document Summary
+
+## Overview
+[Brief description of document type and purpose]
+
+## Key Topics
+- [Topic 1]
+- [Topic 2]
+
+## Limitations
+[Note any limitations due to insufficient content]
+```
+"""
             try:
                 return await self._generate_with_retry_safe(basic_prompt, 1000)
             except Exception as e:
