@@ -7,13 +7,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import io
 import logging
+import re
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ImageProcessor:
     def __init__(self):
-        self.executor = ThreadPoolExecutor(max_workers=4)  # Increased workers for better performance
+        self.executor = ThreadPoolExecutor(max_workers=4)
     
     async def extract_text_from_image(self, image: Image.Image) -> str:
         """Extract text from image using OCR"""
@@ -57,7 +58,7 @@ class ImageProcessor:
         thresh = cv2.adaptiveThreshold(
             denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
-        kernel = np.ones((2,2), np.uint8)  # Slightly larger kernel for better cleanup
+        kernel = np.ones((2,2), np.uint8)
         cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         return Image.fromarray(cleaned)
     
@@ -71,6 +72,8 @@ class ImageProcessor:
         replacements = {
             '0': 'O', '1': 'l', '5': 'S'
         }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
         words = text.split()
         cleaned_words = [word.strip() for word in words if len(word.strip()) > 1]
         return ' '.join(cleaned_words).strip()

@@ -61,6 +61,7 @@ class PDFAgent:
     async def process_documents(self, uploaded_files, progress_bar):
         if not uploaded_files:
             logger.warning("No files uploaded for processing")
+            st.error("No files uploaded. Please select at least one PDF file.")
             return [], []
         
         all_chunks, all_images = [], []
@@ -99,29 +100,35 @@ class PDFAgent:
                         img_data['ocr_text'] = ""
                         img_data['analysis'] = {}
                         img_data['tables'] = []
-                        img_data['has_meaningful_content'] = True
+                        img_data['has_meaningful_content'] = False
                 
                 all_chunks.extend(text_chunks)
                 all_images.extend(images)
             except Exception as e:
                 logger.error(f"Error processing file {file.name}: {e}")
+                st.warning(f"Failed to process {file.name}: {str(e)}")
             finally:
                 os.unlink(tmp_path)
         
-        progress_bar.progress(1.0, text="Creating document embeddings...")
-        if all_chunks:
-            try:
-                await self.vector_store.add_documents(all_chunks)
-                self.vector_store.save_index(self.vector_cache_file)
-                summary = await self.llm_handler.summarize_document(all_chunks, all_images)
-                with open(self.summary_cache_file, 'wb') as f:
-                    pickle.dump(summary, f)
-            except Exception as e:
-                logger.error(f"Error creating embeddings or summary: {e}")
+        if not all_chunks:
+            logger.warning("No text chunks extracted from uploaded files")
+            st.error("No text content extracted from the uploaded files. Please check the documents.")
+            return [], all_images
+        
+        progress_bar.progress(1.0, text="Creating document embeddings and summary...")
+        try:
+            await self.vector_store.add_documents(all_chunks)
+            self.vector_store.save_index(self.vector_cache_file)
+            summary = await self.llm_handler.summarize_document(all_chunks, all_images)
+            with open(self.summary_cache_file, 'wb') as f:
+                pickle.dump(summary, f)
+        except Exception as e:
+            logger.error(f"Error creating embeddings or summary: {e}")
+            st.error(f"Error generating embeddings or summary: {str(e)}")
         
         return all_chunks, all_images
 
-    async def query_documents(self, query, top_k=12):
+    async def query_documents(self, query, top_k=15):
         try:
             relevant_chunks = await self.vector_store.hybrid_search(query, k=top_k)
             response = await self.llm_handler.generate_response(query, relevant_chunks)
@@ -199,20 +206,20 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
         relevance_score = 0.0
         
         if not include_all_pages and img['page'] in cited_pages:
-            relevance_score += 4.0
+            relevance_score += 5.0
         elif include_all_pages:
-            relevance_score += 0.5
+            relevance_score += 0.7
         
         if img.get('ocr_text'):
             img_words = set(img['ocr_text'].lower().split())
             text_overlap = len(search_terms.intersection(img_words))
-            relevance_score += text_overlap * 3.5
+            relevance_score += text_overlap * 4.0
             for term in search_terms:
                 if len(term) > 3 and term in img['ocr_text']:
-                    relevance_score += 2.5
+                    relevance_score += 3.0
         
         if img.get('tables'):
-            relevance_score += len(img['tables']) * 5.0
+            relevance_score += len(img['tables']) * 6.0
         
         if img.get('analysis', {}).get('likely_chart_or_diagram', False):
             data_keywords = {
@@ -221,33 +228,33 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
                 "trend", "comparison", "result", "finding", "metric", "value"
             }
             keyword_matches = search_terms.intersection(data_keywords)
-            relevance_score += len(keyword_matches) * 4.5
+            relevance_score += len(keyword_matches) * 5.0
             if not keyword_matches:
-                relevance_score += 1.5
+                relevance_score += 2.0
         
         if img.get('analysis', {}).get('likely_contains_text', False):
-            relevance_score += 2.0
+            relevance_score += 2.5
         
         quality = img.get('analysis', {}).get('image_quality', 'low')
         if quality == 'high':
-            relevance_score += 2.0
+            relevance_score += 2.5
         elif quality == 'medium':
-            relevance_score += 1.0
+            relevance_score += 1.2
         
         if img.get('has_meaningful_content', False):
-            relevance_score += 1.0
+            relevance_score += 1.5
         
         if img.get('width', 0) > 500 and img.get('height', 0) > 300:
-            relevance_score += 1.0
+            relevance_score += 1.5
         
-        min_relevance_threshold = 0.5 if include_all_pages else 2.0
+        min_relevance_threshold = 0.7 if include_all_pages else 2.5
         if relevance_score >= min_relevance_threshold:
             img_copy = img.copy()
             img_copy['relevance_score'] = relevance_score
             relevant_images.append(img_copy)
     
     relevant_images.sort(key=lambda x: (-x['relevance_score'], x['page'], x.get('index', 0)))
-    return relevant_images[:15]
+    return relevant_images[:20]
 
 def main():
     st.markdown("""
@@ -256,6 +263,7 @@ def main():
             .st-emotion-cache-16txtl3 { padding: 1rem; }
             .stSpinner { margin: 1rem auto; }
             .error-message { color: #D32F2F; font-weight: bold; }
+            .retry-button { margin-top: 1rem; }
         </style>
     """, unsafe_allow_html=True)
     
@@ -271,6 +279,8 @@ def main():
         st.session_state.processed_files = []
     if "summary" not in st.session_state:
         st.session_state.summary = None
+    if "summary_failed" not in st.session_state:
+        st.session_state.summary_failed = False
 
     with st.sidebar:
         st.header("⚙️ Controls")
@@ -286,18 +296,22 @@ def main():
                 st.session_state.messages = []
                 st.session_state.images = []
                 st.session_state.summary = None
+                st.session_state.summary_failed = False
                 
                 try:
-                    _, images = run_async(st.session_state.agent.process_documents(uploaded_files, st.progress(0)))
+                    chunks, images = run_async(st.session_state.agent.process_documents(uploaded_files, st.progress(0)))
                     st.session_state.images = images
                     if os.path.exists(st.session_state.agent.summary_cache_file):
                         with open(st.session_state.agent.summary_cache_file, 'rb') as f:
                             st.session_state.summary = pickle.load(f)
+                        if st.session_state.summary.startswith("Error") or "insufficient" in st.session_state.summary.lower():
+                            st.session_state.summary_failed = True
                     st.success("Documents processed successfully!")
                     st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
                 except Exception as e:
                     logger.error(f"Error processing documents: {e}")
                     st.error(f"Error processing documents: {e}")
+                    st.session_state.summary_failed = True
                 st.rerun()
 
         if st.session_state.processed_files:
@@ -314,6 +328,25 @@ def main():
             st.info(f"Images with tables: {sum(1 for img in st.session_state.images if img.get('tables'))}")
             st.info(f"Meaningful images: {sum(1 for img in st.session_state.images if img.get('has_meaningful_content'))}")
         
+        if st.session_state.summary_failed:
+            st.markdown("---")
+            if st.button("🔄 Retry Summary", key="retry_summary", help="Retry generating the document summary"):
+                with st.spinner("Retrying summary generation..."):
+                    try:
+                        chunks, _ = run_async(st.session_state.agent.process_documents(
+                            [open(f, 'rb') for f in uploaded_files], st.progress(0)
+                        ))
+                        summary = await st.session_state.agent.llm_handler.summarize_document(chunks, st.session_state.images)
+                        with open(st.session_state.agent.summary_cache_file, 'wb') as f:
+                            pickle.dump(summary, f)
+                        st.session_state.summary = summary
+                        st.session_state.summary_failed = False if not summary.startswith("Error") else True
+                        st.success("Summary retry completed!")
+                    except Exception as e:
+                        logger.error(f"Error retrying summary: {e}")
+                        st.error(f"Error retrying summary: {e}")
+                    st.rerun()
+
         st.markdown("---")
         if st.button("🗑️ Clear Session", use_container_width=True):
             for key in list(st.session_state.keys()): 
@@ -327,6 +360,8 @@ def main():
     if st.session_state.summary:
         with st.expander("📝 Document Summary", expanded=True):
             st.markdown(st.session_state.summary)
+            if st.session_state.summary_failed:
+                st.warning("The summary may be incomplete. Click 'Retry Summary' in the sidebar to try again.")
 
     with st.container(border=True):
         if not st.session_state.messages and not st.session_state.processed_files:
@@ -362,7 +397,7 @@ def main():
                                 )
                                 if img.get('ocr_text') and len(img['ocr_text'].strip()) > 10:
                                     with st.expander(f"📝 Text from Page {img['page']}"):
-                                        st.text(img['ocr_text'][:300] + "..." if len(img['ocr_text']) > 300 else img['ocr_text'])
+                                        st.text(img['ocr_text'][:400] + "..." if len(img['ocr_text']) > 400 else img['ocr_text'])
                                 if img.get('tables'):
                                     with st.expander(f"📊 Tables from Page {img['page']}"):
                                         for table in img['tables']:
@@ -379,7 +414,7 @@ def main():
                             response_text = st.session_state.summary
                             sources = []
                         else:
-                            response_text = "No summary available. Please process documents again."
+                            response_text = "No summary available. Please process documents again or retry summary generation."
                             sources = []
                     else:
                         response_text, sources = run_async(st.session_state.agent.query_documents(query))

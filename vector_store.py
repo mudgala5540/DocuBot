@@ -45,7 +45,7 @@ class VectorStore:
             loop = asyncio.get_running_loop()
             embeddings = await loop.run_in_executor(
                 self.executor,
-                lambda: self.model.encode(texts, show_progress_bar=True, batch_size=32)
+                lambda: self.model.encode(texts, show_progress_bar=True, batch_size=64)  # Increased batch size
             )
             self.embeddings = np.array(embeddings)
             dimension = self.embeddings.shape[1]

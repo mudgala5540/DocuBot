@@ -8,6 +8,7 @@ from datetime import datetime
 import threading
 import logging
 import hashlib
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ class LLMHandler:
         self.requests_made = 0
         self._lock = threading.Lock()
         self.response_cache = {}
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Seconds between requests
     
     async def generate_response(self, query: str, relevant_chunks: List[Dict[str, Any]], max_tokens: int = 2000) -> str:
         """Generate response using relevant document chunks"""
@@ -40,9 +43,15 @@ class LLMHandler:
         prompt = self._create_enhanced_agentic_prompt(query, context)
         
         try:
-            response = await self._generate_with_retry_safe(prompt, max_tokens)
+            # Rate limiting
             with self._lock:
+                current_time = time.time()
+                if current_time - self.last_request_time < self.min_request_interval:
+                    await asyncio.sleep(self.min_request_interval - (current_time - self.last_request_time))
+                self.last_request_time = time.time()
                 self.requests_made += 1
+            
+            response = await self._generate_with_retry_safe(prompt, max_tokens)
             self.response_cache[cache_key] = response
             logger.info(f"Generated response for query: {query}")
             return response
@@ -59,9 +68,9 @@ class LLMHandler:
         chunks.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
         context_parts = []
         total_length = 0
-        max_context_length = 20000  # Increased for comprehensive context
+        max_context_length = 25000  # Increased for larger documents
         
-        for chunk in chunks[:25]:
+        for chunk in chunks[:30]:
             chunk_text = f"[PAGE {chunk.get('page', 'N/A')}]\n{chunk['text']}\n"
             if total_length + len(chunk_text) > max_context_length:
                 break
@@ -97,6 +106,7 @@ class LLMHandler:
     async def _generate_with_retry_safe(self, prompt: str, max_tokens: int, max_retries: int = 3) -> str:
         """Generate response with retry logic"""
         def sync_generate():
+            genai_sync = genai  # Avoid re-importing
             genai_sync.configure(api_key=self.api_key)
             model_sync = genai_sync.GenerativeModel('gemini-1.5-flash')
             
@@ -125,20 +135,25 @@ class LLMHandler:
         """Generate a comprehensive summary of the entire document"""
         if not chunks:
             logger.warning("No chunks provided for summarization")
-            return "No document content available for summarization."
+            return "No document content available for summarization. Please upload a valid document."
         
+        # Dynamic chunk sampling based on document length
         total_chunks = len(chunks)
-        sample_size = min(40, total_chunks)  # Increased sample size
+        sample_size = min(50, max(10, total_chunks // 2))  # Dynamic sample size
         step = max(1, total_chunks // sample_size)
         sampled_chunks = chunks[::step][:sample_size]
         
+        if len(sampled_chunks) < 5:
+            logger.warning(f"Insufficient chunks ({len(sampled_chunks)}) for comprehensive summary")
+            return "Insufficient content to generate a meaningful summary. The document may be too short or contain insufficient text."
+        
         image_context = ""
         if image_data:
-            for img in image_data[:10]:  # Limit to 10 images to avoid context overflow
+            for img in image_data[:15]:  # Increased limit for images
                 if img.get('ocr_text') or img.get('tables'):
                     image_context += f"[PAGE {img['page']}]\n"
                     if img.get('ocr_text'):
-                        image_context += f"Image Text: {img['ocr_text'][:300]}\n"
+                        image_context += f"Image Text: {img['ocr_text'][:400]}\n"
                     if img.get('tables'):
                         image_context += f"Table Data: {json.dumps(img['tables'][:3], indent=2)}\n"
         
@@ -164,17 +179,18 @@ Provide a detailed summary with the following sections:
 - Use bullet points for key details.
 - Cite page numbers for all referenced information.
 - If information is missing, state: "No relevant information found in the provided context."
+- Ensure all sections are addressed, even if briefly, to maintain consistency.
 
 **OUTPUT:**
 Provide a concise yet comprehensive summary in markdown format.
 """
         try:
-            response = await self._generate_with_retry_safe(prompt, 2000)  # Increased token limit
+            response = await self._generate_with_retry_safe(prompt, 2500)
             logger.info("Document summary generated successfully")
             return response
         except Exception as e:
             logger.error(f"Error generating summary: {e}")
-            return f"Error generating summary: {str(e)}"
+            return f"Error generating summary: {str(e)}. Please try re-uploading the document or contact support."
     
     async def extract_key_information(self, chunks: List[Dict[str, Any]], info_type: str = "general") -> Dict[str, Any]:
         """Extract specific types of information from documents"""
@@ -182,7 +198,7 @@ Provide a concise yet comprehensive summary in markdown format.
             logger.warning("No chunks provided for information extraction")
             return {"error": "No document content available"}
         
-        context = self._prepare_context(chunks[:30])
+        context = self._prepare_context(chunks[:35])
         
         if info_type == "financial":
             prompt = f"""Extract financial information from the document:
@@ -229,7 +245,7 @@ Provide a concise yet comprehensive summary in markdown format.
 **Format**: Use markdown with clear categories and citations."""
         
         try:
-            response = await self._generate_with_retry_safe(prompt, 1200)
+            response = await self._generate_with_retry_safe(prompt, 1500)
             logger.info(f"Extracted {info_type} information successfully")
             return {"extracted_info": response, "info_type": info_type}
         except Exception as e:
@@ -322,5 +338,5 @@ Provide a concise yet comprehensive summary in markdown format.
                     "status": "error",
                     "error": str(e)
                 })
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.min_request_interval)
         return results

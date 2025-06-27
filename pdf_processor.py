@@ -7,6 +7,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import re
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ class PDFProcessor:
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=4)
     
-    async def extract_text_chunks(self, pdf_path: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
+    async def extract_text_chunks(self, pdf_path: str, chunk_size: int = 1200, overlap: int = 300) -> List[Dict[str, Any]]:
         """Extract text from PDF and create intelligent chunks"""
         if not os.path.exists(pdf_path):
             logger.error(f"PDF file not found: {pdf_path}")
