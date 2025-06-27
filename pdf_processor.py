@@ -9,7 +9,7 @@ import re
 import logging
 import os
 
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class PDFProcessor:
@@ -17,7 +17,7 @@ class PDFProcessor:
         self.executor = ThreadPoolExecutor(max_workers=4)
     
     async def extract_text_chunks(self, pdf_path: str, chunk_size: int = 1200, overlap: int = 300) -> List[Dict[str, Any]]:
-        """Extract text from PDF and create intelligent chunks"""
+        """Extract text from PDF and create intelligent chunks."""
         if not os.path.exists(pdf_path):
             logger.error(f"PDF file not found: {pdf_path}")
             return []
@@ -25,18 +25,18 @@ class PDFProcessor:
         try:
             return await loop.run_in_executor(self.executor, self._extract_text_chunks_sync, pdf_path, chunk_size, overlap)
         except Exception as e:
-            logger.error(f"Error extracting text chunks from {pdf_path}: {e}")
+            logger.error(f"Error extracting text chunks from {pdf_path}: {str(e)}")
             return []
     
     def _extract_text_chunks_sync(self, pdf_path: str, chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
-        """Synchronous text extraction with intelligent chunking"""
+        """Synchronous text extraction with intelligent chunking."""
         try:
             doc = fitz.open(pdf_path)
             chunks = []
             
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                text = page.get_text()
+                text = page.get_text("text", flags=fitz.TEXTFLAGS_TEXT)
                 
                 if not text.strip():
                     logger.debug(f"No text found on page {page_num + 1}")
@@ -50,11 +50,11 @@ class PDFProcessor:
             logger.info(f"Extracted {len(chunks)} text chunks from {pdf_path}")
             return chunks
         except Exception as e:
-            logger.error(f"Error in synchronous text extraction: {e}")
+            logger.error(f"Error in synchronous text extraction: {str(e)}")
             return []
     
     def _clean_text(self, text: str) -> str:
-        """Clean and normalize text"""
+        """Clean and normalize text with improved handling."""
         if not text:
             return ""
         text = re.sub(r'\s+', ' ', text)
@@ -64,9 +64,9 @@ class PDFProcessor:
         return text.strip()
     
     def _create_semantic_chunks(self, text: str, chunk_size: int, overlap: int, page_num: int) -> List[Dict[str, Any]]:
-        """Create semantically meaningful chunks"""
+        """Create semantically meaningful chunks with improved segmentation."""
         chunks = []
-        paragraphs = text.split('\n\n')
+        paragraphs = re.split(r'\n{2,}', text.strip())
         current_chunk = ""
         
         for paragraph in paragraphs:
@@ -99,7 +99,7 @@ class PDFProcessor:
         return chunks
     
     async def extract_images(self, pdf_path: str) -> List[Dict[str, Any]]:
-        """Extract images from PDF"""
+        """Extract images from PDF with improved filtering."""
         if not os.path.exists(pdf_path):
             logger.error(f"PDF file not found: {pdf_path}")
             return []
@@ -107,11 +107,11 @@ class PDFProcessor:
         try:
             return await loop.run_in_executor(self.executor, self._extract_images_sync, pdf_path)
         except Exception as e:
-            logger.error(f"Error extracting images from {pdf_path}: {e}")
+            logger.error(f"Error extracting images from {pdf_path}: {str(e)}")
             return []
     
     def _extract_images_sync(self, pdf_path: str) -> List[Dict[str, Any]]:
-        """Synchronous image extraction with improved filtering"""
+        """Synchronous image extraction with enhanced filtering."""
         try:
             doc = fitz.open(pdf_path)
             images = []
@@ -137,18 +137,18 @@ class PDFProcessor:
                         }
                         images.append(image_data)
                     except Exception as e:
-                        logger.warning(f"Skipping problematic image on page {page_num + 1}: {e}")
+                        logger.warning(f"Skipping problematic image on page {page_num + 1}: {str(e)}")
                         continue
             
             doc.close()
             logger.info(f"Extracted {len(images)} images from {pdf_path}")
             return images
         except Exception as e:
-            logger.error(f"Error in synchronous image extraction: {e}")
+            logger.error(f"Error in synchronous image extraction: {str(e)}")
             return []
     
     def get_document_metadata(self, pdf_path: str) -> Dict[str, Any]:
-        """Extract document metadata"""
+        """Extract document metadata with improved error handling."""
         if not os.path.exists(pdf_path):
             logger.error(f"PDF file not found: {pdf_path}")
             return {}
@@ -169,5 +169,5 @@ class PDFProcessor:
             doc.close()
             return info
         except Exception as e:
-            logger.error(f"Error extracting metadata: {e}")
+            logger.error(f"Error extracting metadata: {str(e)}")
             return {}

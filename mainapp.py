@@ -12,8 +12,9 @@ from image_processor import ImageProcessor
 import nest_asyncio
 import logging
 import hashlib
+from typing import List, Dict, Any
 
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 nest_asyncio.apply()
@@ -27,6 +28,7 @@ st.set_page_config(
 )
 
 def get_or_create_eventloop():
+    """Get or create an asyncio event loop."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -69,8 +71,8 @@ class PDFAgent:
         self.vector_cache_file = os.path.join(cache_dir, "vector_store.pkl")
         self.summary_cache_file = os.path.join(cache_dir, "document_summary.pkl")
 
-    async def process_documents(self, uploaded_files, progress_bar):
-        """Process uploaded PDF files asynchronously."""
+    async def process_documents(self, uploaded_files: List, progress_bar) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Process uploaded PDF files asynchronously with enhanced progress tracking."""
         if not uploaded_files:
             logger.warning("No files uploaded for processing")
             st.error("No files uploaded. Please select at least one PDF file.")
@@ -88,43 +90,38 @@ class PDFAgent:
                 tmp_path = tmp_file.name
             
             try:
-                text_chunks = await self.pdf_processor.extract_text_chunks(tmp_path)
-                images = await self.pdf_processor.extract_images(tmp_path)
+                text_chunks, images = await asyncio.gather(
+                    self.pdf_processor.extract_text_chunks(tmp_path),
+                    self.pdf_processor.extract_images(tmp_path)
+                )
                 
-                for img_data in images:
-                    try:
-                        ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
-                        img_analysis = await self.image_processor.analyze_image_content(img_data['image'])
-                        tables = await self.image_processor.extract_tables_from_image(img_data['image'])
-                        
-                        img_data['ocr_text'] = ocr_text.lower() if ocr_text else ""
-                        img_data['analysis'] = img_analysis
-                        img_data['tables'] = tables
-                        img_data['has_meaningful_content'] = (
-                            len(ocr_text.strip()) > 5 or
-                            img_analysis.get('likely_chart_or_diagram', False) or
-                            img_analysis.get('likely_contains_text', False) or
-                            len(tables) > 0 or
-                            img_analysis.get('image_quality') in ['high', 'medium']
+                image_results = await self.image_processor.batch_process_images([img['image'] for img in images])
+                for img, result in zip(images, image_results):
+                    img.update({
+                        'ocr_text': result['ocr_text'].lower() if result['ocr_text'] else "",
+                        'analysis': result['analysis'],
+                        'tables': result['tables'],
+                        'has_meaningful_content': (
+                            len(result['ocr_text'].strip()) > 5 or
+                            result['analysis'].get('likely_chart_or_diagram', False) or
+                            result['analysis'].get('likely_contains_text', False) or
+                            len(result['tables']) > 0 or
+                            result['analysis'].get('image_quality') in ['high', 'medium']
                         )
-                    except Exception as e:
-                        logger.error(f"Error processing image on page {img_data['page']}: {e}")
-                        img_data['ocr_text'] = ""
-                        img_data['analysis'] = {}
-                        img_data['tables'] = []
-                        img_data['has_meaningful_content'] = False
+                    })
                 
                 all_chunks.extend(text_chunks)
                 all_images.extend(images)
             except Exception as e:
-                logger.error(f"Error processing file {file.name}: {e}")
+                logger.error(f"Error processing file {file.name}: {str(e)}")
                 st.warning(f"Failed to process {file.name}: {str(e)}")
             finally:
-                os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
         
         if not all_chunks:
             logger.warning("No text chunks extracted from uploaded files")
-            st.error("No text content extracted from the uploaded files. Please check the documents.")
+            st.error("No text content extracted. Please check the documents.")
             return [], all_images
         
         progress_bar.progress(1.0, text="Creating document embeddings and summary...")
@@ -135,30 +132,30 @@ class PDFAgent:
             with open(self.summary_cache_file, 'wb') as f:
                 pickle.dump(summary, f)
         except Exception as e:
-            logger.error(f"Error creating embeddings or summary: {e}")
+            logger.error(f"Error creating embeddings or summary: {str(e)}")
             st.error(f"Error generating embeddings or summary: {str(e)}")
         
         return all_chunks, all_images
 
-    async def query_documents(self, query, top_k=15):
-        """Query documents asynchronously."""
+    async def query_documents(self, query: str, top_k: int = 15) -> tuple[str, List[Dict[str, Any]]]:
+        """Query documents asynchronously with improved relevance."""
         try:
             relevant_chunks = await self.vector_store.hybrid_search(query, k=top_k)
             response = await self.llm_handler.generate_response(query, relevant_chunks)
             return response, relevant_chunks
         except Exception as e:
-            logger.error(f"Error querying documents: {e}")
+            logger.error(f"Error querying documents: {str(e)}")
             return self.llm_handler.sanitize_response(f"Error querying documents: {str(e)}"), []
 
-def parse_source_pages(response_text: str) -> list[int]:
+def parse_source_pages(response_text: str) -> List[int]:
     """Parse page numbers from response text."""
     pages = []
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     if match:
         page_numbers = re.findall(r'(?:Page\s+)?(\d+)', match.group(1), re.IGNORECASE)
-        pages.extend([int(p) for p in page_numbers])
+        pages.extend([int(p) for p in page_numbers])  # type: ignore
     page_refs = re.findall(r'(?:page|pg)\s+(\d+)', response_text, re.IGNORECASE)
-    pages.extend([int(p) for p in page_refs])
+    pages.extend([int(p) for p in page_refs])  # type: ignore
     return list(set(pages))
 
 def is_query_document_related(query: str, response_text: str) -> bool:
@@ -192,8 +189,8 @@ def is_query_document_related(query: str, response_text: str) -> bool:
     
     return any(indicator in response_lower for indicator in document_indicators) or len(query_lower.split()) > 2
 
-def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str, source_chunks: list = None) -> list:
-    """Find relevant images based on query and response."""
+def find_relevant_images_enhanced(query: str, cited_pages: List[int], all_images: List[Dict[str, Any]], response_text: str, source_chunks: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Find relevant images based on query and response with improved scoring."""
     if not all_images:
         return []
     
@@ -273,7 +270,7 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
     return relevant_images[:20]
 
 def main():
-    """Main function to run the Streamlit app."""
+    """Main function to run the Streamlit app with improved UI."""
     st.markdown("""
         <style>
             .stApp { background-color: #F0F2F6; }
@@ -281,6 +278,8 @@ def main():
             .stSpinner { margin: 1rem auto; }
             .error-message { color: #D32F2F; font-weight: bold; }
             .retry-button { margin-top: 1rem; }
+            .stButton>button { background-color: #4CAF50; color: white; }
+            .stButton>button:hover { background-color: #45a049; }
         </style>
     """, unsafe_allow_html=True)
     
@@ -304,11 +303,12 @@ def main():
         uploaded_files = st.file_uploader(
             "Upload PDF documents", 
             type=['pdf'], 
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Select one or more PDF files to process."
         )
 
         if uploaded_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
-            with st.spinner("Processing documents..."):
+            with st.spinner("Processing documents, please wait..."):
                 st.session_state.processed_files = [f.name for f in uploaded_files]
                 st.session_state.messages = []
                 st.session_state.images = []
@@ -324,10 +324,10 @@ def main():
                         if st.session_state.summary.startswith("Error") or "insufficient" in st.session_state.summary.lower():
                             st.session_state.summary_failed = True
                     st.success("Documents processed successfully!")
-                    st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
+                    st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Ask any questions about your documents."})
                 except Exception as e:
-                    logger.error(f"Error processing documents: {e}")
-                    st.error(f"Error processing documents: {e}")
+                    logger.error(f"Error processing documents: {str(e)}")
+                    st.error(f"Error processing documents: {str(e)}")
                     st.session_state.summary_failed = True
                 st.rerun()
 
@@ -350,28 +350,27 @@ def main():
             if st.button("🔄 Retry Summary", key="retry_summary", help="Retry generating the document summary"):
                 with st.spinner("Retrying summary generation..."):
                     try:
-                        chunks, _ = run_async(st.session_state.agent.process_documents(
-                            [open(f, 'rb') for f in uploaded_files], st.progress(0)
+                        chunks, images = run_async(st.session_state.agent.process_documents(
+                            uploaded_files, st.progress(0)
                         ))
-                        summary = run_async(st.session_state.agent.llm_handler.summarize_document(chunks, st.session_state.images))
+                        summary = run_async(st.session_state.agent.llm_handler.summarize_document(chunks, images))
                         with open(st.session_state.agent.summary_cache_file, 'wb') as f:
                             pickle.dump(summary, f)
                         st.session_state.summary = summary
                         st.session_state.summary_failed = False if not summary.startswith("Error") else True
                         st.success("Summary retry completed!")
                     except Exception as e:
-                        logger.error(f"Error retrying summary: {e}")
-                        st.error(f"Error retrying summary: {e}")
+                        logger.error(f"Error retrying summary: {str(e)}")
+                        st.error(f"Error retrying summary: {str(e)}")
                     st.rerun()
 
         st.markdown("---")
-        if st.button("🗑️ Clear Session", use_container_width=True):
+        if st.button("🗑️ Clear Session", use_container_width=True, help="Reset the session and clear all data"):
             for key in list(st.session_state.keys()): 
                 del st.session_state[key]
-            if os.path.exists(st.session_state.agent.vector_cache_file):
-                os.unlink(st.session_state.agent.vector_cache_file)
-            if os.path.exists(st.session_state.agent.summary_cache_file):
-                os.unlink(st.session_state.agent.summary_cache_file)
+            for cache_file in [st.session_state.agent.vector_cache_file, st.session_state.agent.summary_cache_file]:
+                if os.path.exists(cache_file):
+                    os.unlink(cache_file)
             st.rerun()
 
     if st.session_state.summary:
@@ -382,9 +381,9 @@ def main():
 
     with st.container(border=True):
         if not st.session_state.messages and not st.session_state.processed_files:
-            st.info("Welcome! Please upload your documents using the sidebar to get started.")
+            st.info("Welcome to IntelliDoc Agent! Upload your PDF documents using the sidebar to get started.")
         elif not st.session_state.messages and st.session_state.processed_files:
-            st.info("Documents processed. Ask a question to begin the conversation.")
+            st.info("Documents processed successfully. Ask a question about your documents to begin.")
 
         for message in st.session_state.messages:
             avatar = "👤" if message["role"] == "user" else "✨"
@@ -397,7 +396,7 @@ def main():
                 if "sources" in message and message["sources"] and message.get("is_document_related", True):
                     with st.expander("📚 Show Sources"):
                         for i, source in enumerate(message["sources"]):
-                            st.info(f"**Source {i+1} (Page {source['page']}, Score: {source.get('similarity_score', 0):.3f})**\n\n{source['text']}")
+                            st.info(f"**Source {i+1} (Page {source['page']}, Score: {source.get('similarity_score', 0):.3f})**\n\n{source['text'][:500]}{'...' if len(source['text']) > 500 else ''}")
 
                 if "images" in message and message["images"]:
                     st.markdown("**🖼️ Relevant Images:**")
@@ -421,7 +420,7 @@ def main():
                                             st.table(table)
 
     if query := st.chat_input("Ask a question about your documents..."):
-        with st.spinner("Generating response..."):
+        with st.spinner("Generating response, please wait..."):
             st.session_state.messages.append({"role": "user", "content": query})
             
             try:
@@ -462,11 +461,11 @@ def main():
                     "is_document_related": is_doc_related
                 }
             except Exception as e:
-                logger.error(f"Critical error processing query: {e}")
-                st.error(f"A critical error occurred: {e}")
+                logger.error(f"Critical error processing query: {str(e)}")
+                st.error(f"A critical error occurred: {str(e)}")
                 assistant_message = {
                     "role": "assistant",
-                    "content": sanitize_response(f"I'm sorry, I encountered an error: {e}"),
+                    "content": sanitize_response(f"I'm sorry, I encountered an error: {str(e)}"),
                     "error": True
                 }
             

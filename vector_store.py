@@ -23,17 +23,17 @@ class VectorStore:
         self._load_model()
     
     def _load_model(self):
-        """Load the sentence transformer model"""
+        """Load the sentence transformer model with fallback."""
         try:
             self.model = SentenceTransformer(self.model_name, device='cpu')
             logger.info(f"Loaded model: {self.model_name}")
         except Exception as e:
-            logger.error(f"Error loading model {self.model_name}: {e}")
+            logger.error(f"Error loading model {self.model_name}: {str(e)}")
             self.model = SentenceTransformer("all-MiniLM-L12-v2", device='cpu')
             logger.info("Loaded fallback model: all-MiniLM-L12-v2")
     
     async def add_documents(self, documents: List[Dict[str, Any]]):
-        """Add documents to vector store"""
+        """Add documents to vector store with optimized batching."""
         if not documents:
             logger.warning("No documents provided to add to vector store")
             return
@@ -45,7 +45,7 @@ class VectorStore:
             loop = asyncio.get_running_loop()
             embeddings = await loop.run_in_executor(
                 self.executor,
-                lambda: self.model.encode(texts, show_progress_bar=True, batch_size=64)  # Increased batch size
+                lambda: self.model.encode(texts, show_progress_bar=True, batch_size=128)  # Increased batch size
             )
             self.embeddings = np.array(embeddings)
             dimension = self.embeddings.shape[1]
@@ -54,13 +54,13 @@ class VectorStore:
             self.index.add(normalized_embeddings.astype('float32'))
             logger.info(f"Added {len(documents)} documents to vector store")
         except Exception as e:
-            logger.error(f"Error adding documents to vector store: {e}")
+            logger.error(f"Error adding documents to vector store: {str(e)}")
             self.documents = []
             self.embeddings = None
             self.index = None
     
     async def similarity_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar documents"""
+        """Search for similar documents with improved error handling."""
         if not query.strip():
             logger.warning("Empty query provided for similarity search")
             return []
@@ -89,11 +89,11 @@ class VectorStore:
             logger.info(f"Similarity search returned {len(results)} results for query: {query}")
             return results
         except Exception as e:
-            logger.error(f"Error in similarity search: {e}")
+            logger.error(f"Error in similarity search: {str(e)}")
             return []
     
     async def hybrid_search(self, query: str, k: int = 5, alpha: float = 0.7) -> List[Dict[str, Any]]:
-        """Hybrid search combining semantic and keyword matching"""
+        """Hybrid search combining semantic and keyword matching with improved scoring."""
         if not query.strip():
             logger.warning("Empty query provided for hybrid search")
             return []
@@ -139,11 +139,11 @@ class VectorStore:
             logger.info(f"Hybrid search returned {len(final_results[:k])} results for query: {query}")
             return final_results[:k]
         except Exception as e:
-            logger.error(f"Error in hybrid search: {e}")
+            logger.error(f"Error in hybrid search: {str(e)}")
             return []
     
     def _keyword_search(self, query: str, k: int) -> List[Dict[str, Any]]:
-        """Simple keyword-based search"""
+        """Simple keyword-based search with improved scoring."""
         query_words = set(query.lower().split())
         results = []
         
@@ -151,7 +151,7 @@ class VectorStore:
             text_words = set(doc['text'].lower().split())
             overlap = len(query_words.intersection(text_words))
             if overlap > 0:
-                score = overlap / len(query_words)
+                score = overlap / (len(query_words) + 0.1)  # Avoid division by zero
                 doc_copy = doc.copy()
                 doc_copy['keyword_score'] = score
                 results.append(doc_copy)
@@ -160,7 +160,7 @@ class VectorStore:
         return results[:k]
     
     def save_index(self, filepath: str):
-        """Save vector store to disk"""
+        """Save vector store to disk with improved error handling."""
         try:
             data = {
                 'documents': self.documents,
@@ -173,10 +173,10 @@ class VectorStore:
                 faiss.write_index(self.index, filepath + '.faiss')
             logger.info(f"Saved vector store to {filepath}")
         except Exception as e:
-            logger.error(f"Error saving index: {e}")
+            logger.error(f"Error saving index: {str(e)}")
     
     def load_index(self, filepath: str):
-        """Load vector store from disk"""
+        """Load vector store from disk with improved error handling."""
         try:
             if not os.path.exists(filepath):
                 logger.warning(f"Index file {filepath} not found")
@@ -191,11 +191,11 @@ class VectorStore:
             logger.info(f"Loaded vector store from {filepath}")
             return True
         except Exception as e:
-            logger.error(f"Error loading index: {e}")
+            logger.error(f"Error loading index: {str(e)}")
             return False
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get vector store statistics"""
+        """Get vector store statistics."""
         return {
             'num_documents': len(self.documents),
             'embedding_dimension': self.embeddings.shape[1] if self.embeddings is not None else 0,

@@ -9,7 +9,7 @@ import io
 import logging
 import re
 
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ImageProcessor:
@@ -17,7 +17,7 @@ class ImageProcessor:
         self.executor = ThreadPoolExecutor(max_workers=4)
     
     async def extract_text_from_image(self, image: Image.Image) -> str:
-        """Extract text from image using OCR"""
+        """Extract text from image using OCR with improved preprocessing."""
         if not image:
             logger.warning("No image provided for OCR")
             return ""
@@ -25,36 +25,40 @@ class ImageProcessor:
         try:
             return await loop.run_in_executor(self.executor, self._extract_text_sync, image)
         except Exception as e:
-            logger.error(f"OCR extraction failed: {e}")
+            logger.error(f"OCR extraction failed: {str(e)}")
             return ""
     
     def _extract_text_sync(self, image: Image.Image) -> str:
-        """Synchronous OCR text extraction"""
+        """Synchronous OCR text extraction with enhanced preprocessing."""
         try:
             processed_image = self._preprocess_image(image)
             custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,!?@#$%^&*()_+-=[]{}|;:,.<>?/~` '
             text = pytesseract.image_to_string(processed_image, config=custom_config)
-            cleaned_text = self._clean_ocr_text(text)
-            return cleaned_text
+            return self._clean_ocr_text(text)
         except Exception as e:
-            logger.error(f"OCR Error: {e}")
+            logger.error(f"OCR error: {str(e)}")
             return ""
     
     def _preprocess_image(self, image: Image.Image) -> Image.Image:
-        """Preprocess image for better OCR accuracy"""
+        """Preprocess image for better OCR accuracy."""
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
         opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         height, width = opencv_image.shape[:2]
+        
+        # Resize if image is too small
         if height < 100 or width < 100:
             scale_factor = max(200/height, 200/width)
             new_width = int(width * scale_factor)
             new_height = int(height * scale_factor)
             opencv_image = cv2.resize(opencv_image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
         
+        # Enhanced preprocessing
         gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-        denoised = cv2.fastNlMeansDenoising(gray)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(gray)
+        denoised = cv2.fastNlMeansDenoising(enhanced)
         thresh = cv2.adaptiveThreshold(
             denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
@@ -63,23 +67,19 @@ class ImageProcessor:
         return Image.fromarray(cleaned)
     
     def _clean_ocr_text(self, text: str) -> str:
-        """Clean and normalize OCR extracted text"""
+        """Clean and normalize OCR extracted text."""
         if not text:
             return ""
-        
-        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\s+', ' ', text.strip())
         text = re.sub(r'[^\w\s.,!?@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]', '', text)
-        replacements = {
-            '0': 'O', '1': 'l', '5': 'S'
-        }
+        replacements = {'0': 'O', '1': 'l', '5': 'S'}
         for old, new in replacements.items():
             text = text.replace(old, new)
-        words = text.split()
-        cleaned_words = [word.strip() for word in words if len(word.strip()) > 1]
-        return ' '.join(cleaned_words).strip()
+        words = [word.strip() for word in text.split() if len(word.strip()) > 1]
+        return ' '.join(words).strip()
     
     async def analyze_image_content(self, image: Image.Image) -> Dict[str, Any]:
-        """Analyze image content and properties"""
+        """Analyze image content and properties."""
         if not image:
             logger.warning("No image provided for analysis")
             return {}
@@ -87,11 +87,11 @@ class ImageProcessor:
         try:
             return await loop.run_in_executor(self.executor, self._analyze_image_sync, image)
         except Exception as e:
-            logger.error(f"Image analysis failed: {e}")
+            logger.error(f"Image analysis failed: {str(e)}")
             return {}
     
     def _analyze_image_sync(self, image: Image.Image) -> Dict[str, Any]:
-        """Synchronous image analysis"""
+        """Synchronous image analysis with improved metrics."""
         try:
             opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
@@ -116,11 +116,11 @@ class ImageProcessor:
                 'image_quality': 'high' if laplacian_var > 100 else 'medium' if laplacian_var > 50 else 'low'
             }
         except Exception as e:
-            logger.error(f"Image analysis error: {e}")
+            logger.error(f"Image analysis error: {str(e)}")
             return {}
     
     async def extract_tables_from_image(self, image: Image.Image) -> List[List[str]]:
-        """Extract table data from image"""
+        """Extract table data from image with improved detection."""
         if not image:
             logger.warning("No image provided for table extraction")
             return []
@@ -128,18 +128,19 @@ class ImageProcessor:
         try:
             return await loop.run_in_executor(self.executor, self._extract_tables_sync, image)
         except Exception as e:
-            logger.error(f"Table extraction failed: {e}")
+            logger.error(f"Table extraction failed: {str(e)}")
             return []
     
     def _extract_tables_sync(self, image: Image.Image) -> List[List[str]]:
-        """Synchronous table extraction"""
+        """Synchronous table extraction with enhanced line detection."""
         try:
             opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
+            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
             horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
             vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-            horizontal_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, horizontal_kernel)
-            vertical_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, vertical_kernel)
+            horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel)
+            vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
             table_structure = cv2.addWeighted(horizontal_lines, 0.5, vertical_lines, 0.5, 0.0)
             contours, _ = cv2.findContours(table_structure, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -156,11 +157,11 @@ class ImageProcessor:
                 return table_data
             return []
         except Exception as e:
-            logger.error(f"Table extraction error: {e}")
+            logger.error(f"Table extraction error: {str(e)}")
             return []
     
     async def batch_process_images(self, images: List[Image.Image]) -> List[Dict[str, Any]]:
-        """Process multiple images in batch"""
+        """Process multiple images in batch with improved error handling."""
         if not images:
             logger.warning("No images provided for batch processing")
             return []
@@ -170,7 +171,7 @@ class ImageProcessor:
         processed_results = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Error processing image {i}: {result}")
+                logger.error(f"Error processing image {i}: {str(result)}")
                 processed_results.append({
                     'image_index': i,
                     'error': str(result),
@@ -186,12 +187,13 @@ class ImageProcessor:
         return processed_results
     
     async def _process_single_image(self, image: Image.Image, index: int) -> Dict[str, Any]:
-        """Process a single image completely"""
+        """Process a single image completely."""
         try:
-            ocr_text = await self.extract_text_from_image(image)
-            analysis = await self.analyze_image_content(image)
-            tables = await self.extract_tables_from_image(image)
-            
+            ocr_text, analysis, tables = await asyncio.gather(
+                self.extract_text_from_image(image),
+                self.analyze_image_content(image),
+                self.extract_tables_from_image(image)
+            )
             return {
                 'image_index': index,
                 'ocr_text': ocr_text,
@@ -201,7 +203,7 @@ class ImageProcessor:
                 'has_tables': len(tables) > 0
             }
         except Exception as e:
-            logger.error(f"Error processing single image {index}: {e}")
+            logger.error(f"Error processing single image {index}: {str(e)}")
             return {
                 'image_index': index,
                 'error': str(e),
