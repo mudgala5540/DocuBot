@@ -1,8 +1,3 @@
-
----
-
-### `mainapp.py`
-```python
 import streamlit as st
 import os
 import tempfile
@@ -43,6 +38,7 @@ def get_or_create_eventloop():
         return loop
 
 def run_async(coro):
+    """Run an async coroutine in a synchronous context."""
     loop = get_or_create_eventloop()
     if loop.is_running():
         import concurrent.futures
@@ -53,7 +49,7 @@ def run_async(coro):
         return loop.run_until_complete(coro)
 
 def sanitize_response(response: str) -> str:
-    """Remove internal processing messages from response"""
+    """Remove internal processing messages from response."""
     unwanted_phrases = [
         r"STEP \d+:", r"thinking", r"processing", r"query classification",
         r"internal error", r"debug:", r"agentic prompt"
@@ -74,6 +70,7 @@ class PDFAgent:
         self.summary_cache_file = os.path.join(cache_dir, "document_summary.pkl")
 
     async def process_documents(self, uploaded_files, progress_bar):
+        """Process uploaded PDF files asynchronously."""
         if not uploaded_files:
             logger.warning("No files uploaded for processing")
             st.error("No files uploaded. Please select at least one PDF file.")
@@ -144,6 +141,7 @@ class PDFAgent:
         return all_chunks, all_images
 
     async def query_documents(self, query, top_k=15):
+        """Query documents asynchronously."""
         try:
             relevant_chunks = await self.vector_store.hybrid_search(query, k=top_k)
             response = await self.llm_handler.generate_response(query, relevant_chunks)
@@ -153,6 +151,7 @@ class PDFAgent:
             return self.llm_handler.sanitize_response(f"Error querying documents: {str(e)}"), []
 
 def parse_source_pages(response_text: str) -> list[int]:
+    """Parse page numbers from response text."""
     pages = []
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     if match:
@@ -163,6 +162,7 @@ def parse_source_pages(response_text: str) -> list[int]:
     return list(set(pages))
 
 def is_query_document_related(query: str, response_text: str) -> bool:
+    """Determine if the query is document-related."""
     casual_phrases = [
         "hello", "hi", "hey", "thank", "thanks", "thank you", "you're welcome",
         "how are you", "good morning", "good afternoon", "good evening", 
@@ -193,6 +193,7 @@ def is_query_document_related(query: str, response_text: str) -> bool:
     return any(indicator in response_lower for indicator in document_indicators) or len(query_lower.split()) > 2
 
 def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str, source_chunks: list = None) -> list:
+    """Find relevant images based on query and response."""
     if not all_images:
         return []
     
@@ -272,6 +273,7 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
     return relevant_images[:20]
 
 def main():
+    """Main function to run the Streamlit app."""
     st.markdown("""
         <style>
             .stApp { background-color: #F0F2F6; }
@@ -351,7 +353,7 @@ def main():
                         chunks, _ = run_async(st.session_state.agent.process_documents(
                             [open(f, 'rb') for f in uploaded_files], st.progress(0)
                         ))
-                        summary = await st.session_state.agent.llm_handler.summarize_document(chunks, st.session_state.images)
+                        summary = run_async(st.session_state.agent.llm_handler.summarize_document(chunks, st.session_state.images))
                         with open(st.session_state.agent.summary_cache_file, 'wb') as f:
                             pickle.dump(summary, f)
                         st.session_state.summary = summary
@@ -411,7 +413,7 @@ def main():
                                     use_container_width=True
                                 )
                                 if img.get('ocr_text') and len(img['ocr_text'].strip()) > 10:
-                                    with st.expander(f"� rašText from Page {img['page']}"):
+                                    with st.expander(f"Text from Page {img['page']}"):
                                         st.text(img['ocr_text'][:400] + "..." if len(img['ocr_text']) > 400 else img['ocr_text'])
                                 if img.get('tables'):
                                     with st.expander(f"📊 Tables from Page {img['page']}"):
