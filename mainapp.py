@@ -3,20 +3,22 @@ import os
 import tempfile
 import asyncio
 import re
+import pickle
 from dotenv import load_dotenv
 from pdf_processor import PDFProcessor
 from vector_store import VectorStore
 from llm_handler import LLMHandler
 from image_processor import ImageProcessor
 import nest_asyncio
+import logging
+import hashlib
 
-# Apply the patch to allow nested asyncio event loops. This MUST be at the top.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 nest_asyncio.apply()
-
-# Load environment variables from .env file
 load_dotenv()
 
-# --- Page Config (UI OVERHAUL) ---
 st.set_page_config(
     page_title="IntelliDoc Agent",
     page_icon="✨",
@@ -24,7 +26,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- THE DEFINITIVE FIX for the "Task attached to a different loop" Error ---
 def get_or_create_eventloop():
     try:
         loop = asyncio.get_event_loop()
@@ -37,10 +38,8 @@ def get_or_create_eventloop():
         return loop
 
 def run_async(coro):
-    """Run async coroutine in the current event loop safely"""
     loop = get_or_create_eventloop()
     if loop.is_running():
-        # If loop is already running, we need to create a new task
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, coro)
@@ -48,15 +47,22 @@ def run_async(coro):
     else:
         return loop.run_until_complete(coro)
 
-# --- Agent Class (CRITICAL FIX APPLIED) ---
 class PDFAgent:
-    def __init__(self):
+    def __init__(self, cache_dir: str = ".cache"):
         self.pdf_processor = PDFProcessor()
         self.vector_store = VectorStore()
         self.llm_handler = LLMHandler()
         self.image_processor = ImageProcessor()
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.vector_cache_file = os.path.join(cache_dir, "vector_store.pkl")
+        self.summary_cache_file = os.path.join(cache_dir, "document_summary.pkl")
 
     async def process_documents(self, uploaded_files, progress_bar):
+        if not uploaded_files:
+            logger.warning("No files uploaded for processing")
+            return [], []
+        
         all_chunks, all_images = [], []
         total_files = len(uploaded_files)
         
@@ -72,71 +78,74 @@ class PDFAgent:
                 text_chunks = await self.pdf_processor.extract_text_chunks(tmp_path)
                 images = await self.pdf_processor.extract_images(tmp_path)
                 
-                # Enhanced OCR processing for better image relevance matching
                 for img_data in images:
                     try:
                         ocr_text = await self.image_processor.extract_text_from_image(img_data['image'])
                         img_analysis = await self.image_processor.analyze_image_content(img_data['image'])
+                        tables = await self.image_processor.extract_tables_from_image(img_data['image'])
                         
-                        # Store both OCR text and analysis
                         img_data['ocr_text'] = ocr_text.lower() if ocr_text else ""
                         img_data['analysis'] = img_analysis
+                        img_data['tables'] = tables
                         img_data['has_meaningful_content'] = (
-                            len(ocr_text.strip()) > 5 or  # Reduced threshold for text
-                            img_analysis.get('likely_chart_or_diagram', False) or  # Is a chart/diagram
-                            img_analysis.get('likely_contains_text', False) or  # Contains text elements
-                            img_analysis.get('image_quality') in ['high', 'medium']  # Good quality images
+                            len(ocr_text.strip()) > 5 or
+                            img_analysis.get('likely_chart_or_diagram', False) or
+                            img_analysis.get('likely_contains_text', False) or
+                            len(tables) > 0 or
+                            img_analysis.get('image_quality') in ['high', 'medium']
                         )
                     except Exception as e:
-                        print(f"Error processing image on page {img_data['page']}: {e}")
+                        logger.error(f"Error processing image on page {img_data['page']}: {e}")
                         img_data['ocr_text'] = ""
                         img_data['analysis'] = {}
-                        img_data['has_meaningful_content'] = True  # Default to True to be inclusive
+                        img_data['tables'] = []
+                        img_data['has_meaningful_content'] = True
                 
                 all_chunks.extend(text_chunks)
                 all_images.extend(images)
+            except Exception as e:
+                logger.error(f"Error processing file {file.name}: {e}")
             finally:
                 os.unlink(tmp_path)
         
         progress_bar.progress(1.0, text="Creating document embeddings...")
         if all_chunks:
-            await self.vector_store.add_documents(all_chunks)
+            try:
+                await self.vector_store.add_documents(all_chunks)
+                self.vector_store.save_index(self.vector_cache_file)
+                summary = await self.llm_handler.summarize_document(all_chunks, all_images)
+                with open(self.summary_cache_file, 'wb') as f:
+                    pickle.dump(summary, f)
+            except Exception as e:
+                logger.error(f"Error creating embeddings or summary: {e}")
         
         return all_chunks, all_images
 
-    async def query_documents(self, query, top_k=8):
-        relevant_chunks = await self.vector_store.similarity_search(query, k=top_k)
-        response = await self.llm_handler.generate_response(query, relevant_chunks)
-        return response, relevant_chunks
+    async def query_documents(self, query, top_k=12):
+        try:
+            relevant_chunks = await self.vector_store.hybrid_search(query, k=top_k)
+            response = await self.llm_handler.generate_response(query, relevant_chunks)
+            return response, relevant_chunks
+        except Exception as e:
+            logger.error(f"Error querying documents: {e}")
+            return f"Error querying documents: {str(e)}", []
 
-# --- Enhanced Helper Functions ---
 def parse_source_pages(response_text: str) -> list[int]:
-    """Extract page numbers from source citations with multiple patterns"""
     pages = []
-    
-    # Pattern 1: (Source: Page X, Page Y)
     match = re.search(r'\(Source: (.*?)\)', response_text, re.IGNORECASE)
     if match:
         page_numbers = re.findall(r'(?:Page\s+)?(\d+)', match.group(1), re.IGNORECASE)
         pages.extend([int(p) for p in page_numbers])
-    
-    # Pattern 2: Look for any page references in the response
     page_refs = re.findall(r'(?:page|pg)\s+(\d+)', response_text, re.IGNORECASE)
     pages.extend([int(p) for p in page_refs])
-    
-    # Remove duplicates and return
-    return list(set(pages)) if pages else []
+    return list(set(pages))
 
 def is_query_document_related(query: str, response_text: str) -> bool:
-    """Determine if the query is document-related based on query and response"""
-    # Simple greetings and pleasantries
     casual_phrases = [
         "hello", "hi", "hey", "thank", "thanks", "thank you", "you're welcome",
         "how are you", "good morning", "good afternoon", "good evening", 
         "goodbye", "bye", "see you", "nice to meet", "pleasure"
     ]
-    
-    # Nonsense or clearly irrelevant queries
     irrelevant_phrases = [
         "asdf", "qwerty", "lorem ipsum", "test test", "xyz", "abc",
         "color of the sky", "weather today", "tell me a joke", "what's funny",
@@ -146,46 +155,34 @@ def is_query_document_related(query: str, response_text: str) -> bool:
     query_lower = query.lower().strip()
     response_lower = response_text.lower()
     
-    # Check for casual conversation
     if any(phrase in query_lower for phrase in casual_phrases):
         return False
-    
-    # Check for nonsense queries
     if (any(phrase in query_lower for phrase in irrelevant_phrases) or 
         len(query_lower) < 3 or 
-        query_lower.count(query_lower[0]) > len(query_lower) * 0.7):  # Repetitive characters
+        query_lower.count(query_lower[0]) > len(query_lower) * 0.7):
         return False
     
-    # Check if response indicates document usage
     document_indicators = [
         "(source:", "based on the provided documents", "from the document",
         "according to the document", "the document shows", "as mentioned in",
         "could not find", "page"
     ]
     
-    if any(indicator in response_lower for indicator in document_indicators):
-        return True
-    
-    # If query has meaningful content and doesn't match casual/irrelevant patterns
-    return len(query_lower.split()) > 1
+    return any(indicator in response_lower for indicator in document_indicators) or len(query_lower.split()) > 2
 
 def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: list, response_text: str, source_chunks: list = None) -> list:
-    """Enhanced image relevance matching with comprehensive scoring"""
     if not all_images:
         return []
     
-    # If no cited pages, try to find pages from source chunks
     if not cited_pages and source_chunks:
         cited_pages = list(set([chunk.get('page', 0) for chunk in source_chunks if chunk.get('page')]))
     
-    # If still no pages, include all pages but with lower base score
     include_all_pages = not cited_pages
     
     query_words = set(query.lower().split())
     response_words = set(response_text.lower().split())
     combined_search_terms = query_words.union(response_words)
     
-    # Remove common stop words but keep important ones
     stop_words = {
         "the", "is", "at", "which", "on", "a", "an", "and", "or", "but", "in", 
         "with", "to", "for", "of", "as", "by", "from", "about", "this", "that",
@@ -196,31 +193,27 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
     relevant_images = []
     
     for img in all_images:
-        # Skip images not on cited pages (unless including all)
         if not include_all_pages and img['page'] not in cited_pages:
             continue
         
         relevance_score = 0.0
         
-        # Base score for being on a cited page
         if not include_all_pages and img['page'] in cited_pages:
-            relevance_score += 2.0
+            relevance_score += 4.0
         elif include_all_pages:
-            relevance_score += 0.5  # Lower base score when no specific pages cited
+            relevance_score += 0.5
         
-        # OCR text relevance (high weight)
         if img.get('ocr_text'):
             img_words = set(img['ocr_text'].lower().split())
             text_overlap = len(search_terms.intersection(img_words))
-            if text_overlap > 0:
-                relevance_score += text_overlap * 2.5
-            
-            # Bonus for exact phrase matches
+            relevance_score += text_overlap * 3.5
             for term in search_terms:
                 if len(term) > 3 and term in img['ocr_text']:
-                    relevance_score += 1.5
+                    relevance_score += 2.5
         
-        # Chart/diagram relevance
+        if img.get('tables'):
+            relevance_score += len(img['tables']) * 5.0
+        
         if img.get('analysis', {}).get('likely_chart_or_diagram', False):
             data_keywords = {
                 "chart", "graph", "data", "statistics", "figure", "diagram", 
@@ -228,62 +221,46 @@ def find_relevant_images_enhanced(query: str, cited_pages: list, all_images: lis
                 "trend", "comparison", "result", "finding", "metric", "value"
             }
             keyword_matches = search_terms.intersection(data_keywords)
-            if keyword_matches:
-                relevance_score += len(keyword_matches) * 3.0
-            else:
-                # Even if no direct matches, charts are often relevant
-                relevance_score += 1.0
+            relevance_score += len(keyword_matches) * 4.5
+            if not keyword_matches:
+                relevance_score += 1.5
         
-        # Text-containing image relevance
         if img.get('analysis', {}).get('likely_contains_text', False):
-            relevance_score += 1.0
+            relevance_score += 2.0
         
-        # Image quality bonus
         quality = img.get('analysis', {}).get('image_quality', 'low')
         if quality == 'high':
-            relevance_score += 1.0
+            relevance_score += 2.0
         elif quality == 'medium':
-            relevance_score += 0.5
+            relevance_score += 1.0
         
-        # Content type bonuses
         if img.get('has_meaningful_content', False):
-            relevance_score += 0.5
+            relevance_score += 1.0
         
-        # Size bonus for substantial images
         if img.get('width', 0) > 500 and img.get('height', 0) > 300:
-            relevance_score += 0.5
+            relevance_score += 1.0
         
-        # Always include images with some relevance (lowered threshold)
-        min_relevance_threshold = 0.5 if include_all_pages else 1.0
-        
+        min_relevance_threshold = 0.5 if include_all_pages else 2.0
         if relevance_score >= min_relevance_threshold:
             img_copy = img.copy()
             img_copy['relevance_score'] = relevance_score
             relevant_images.append(img_copy)
     
-    # Sort by relevance score (descending) and then by page number
     relevant_images.sort(key=lambda x: (-x['relevance_score'], x['page'], x.get('index', 0)))
-    
-    # Limit to reasonable number but be more generous
-    max_images = 10 if len(relevant_images) > 10 else len(relevant_images)
-    return relevant_images[:max_images]
+    return relevant_images[:15]
 
-# --- Streamlit UI and Application Flow ---
 def main():
     st.markdown("""
         <style>
-            .stApp {
-                background-color: #F0F2F6;
-            }
-            .st-emotion-cache-16txtl3 {
-                padding: 1rem 1rem 1rem;
-            }
+            .stApp { background-color: #F0F2F6; }
+            .st-emotion-cache-16txtl3 { padding: 1rem; }
+            .stSpinner { margin: 1rem auto; }
+            .error-message { color: #D32F2F; font-weight: bold; }
         </style>
     """, unsafe_allow_html=True)
     
     st.markdown("<h1 style='text-align: center; color: #1E1E1E;'>✨ IntelliDoc Agent</h1>", unsafe_allow_html=True)
 
-    # Initialize session state
     if 'agent' not in st.session_state:
         st.session_state.agent = PDFAgent()
     if "messages" not in st.session_state:
@@ -292,8 +269,9 @@ def main():
         st.session_state.images = []
     if "processed_files" not in st.session_state:
         st.session_state.processed_files = []
+    if "summary" not in st.session_state:
+        st.session_state.summary = None
 
-    # Sidebar for controls
     with st.sidebar:
         st.header("⚙️ Controls")
         uploaded_files = st.file_uploader(
@@ -303,23 +281,24 @@ def main():
         )
 
         if uploaded_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
-            st.session_state.processed_files = [f.name for f in uploaded_files]
-            st.session_state.messages = []
-            st.session_state.images = []
-            
-            progress_bar_placeholder = st.empty()
-            progress_bar = progress_bar_placeholder.progress(0)
-            
-            try:
-                _, images = run_async(st.session_state.agent.process_documents(uploaded_files, progress_bar))
-                st.session_state.images = images
-                progress_bar_placeholder.empty()
-                st.success("Documents processed successfully!")
-                st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
-            except Exception as e:
-                progress_bar_placeholder.empty()
-                st.error(f"Error processing documents: {e}")
-            st.rerun()
+            with st.spinner("Processing documents..."):
+                st.session_state.processed_files = [f.name for f in uploaded_files]
+                st.session_state.messages = []
+                st.session_state.images = []
+                st.session_state.summary = None
+                
+                try:
+                    _, images = run_async(st.session_state.agent.process_documents(uploaded_files, st.progress(0)))
+                    st.session_state.images = images
+                    if os.path.exists(st.session_state.agent.summary_cache_file):
+                        with open(st.session_state.agent.summary_cache_file, 'rb') as f:
+                            st.session_state.summary = pickle.load(f)
+                    st.success("Documents processed successfully!")
+                    st.session_state.messages.append({"role": "assistant", "content": "✅ Documents are ready. Feel free to ask any questions."})
+                except Exception as e:
+                    logger.error(f"Error processing documents: {e}")
+                    st.error(f"Error processing documents: {e}")
+                st.rerun()
 
         if st.session_state.processed_files:
             st.markdown("---")
@@ -327,26 +306,33 @@ def main():
             for file_name in st.session_state.processed_files:
                 st.info(f"📄 {file_name}")
         
-        # Debug info
         if st.session_state.images:
             st.markdown("---")
             st.subheader("📊 Debug Info")
             st.info(f"Total images: {len(st.session_state.images)}")
             st.info(f"Images with OCR: {sum(1 for img in st.session_state.images if img.get('ocr_text'))}")
+            st.info(f"Images with tables: {sum(1 for img in st.session_state.images if img.get('tables'))}")
             st.info(f"Meaningful images: {sum(1 for img in st.session_state.images if img.get('has_meaningful_content'))}")
         
         st.markdown("---")
         if st.button("🗑️ Clear Session", use_container_width=True):
             for key in list(st.session_state.keys()): 
                 del st.session_state[key]
+            if os.path.exists(st.session_state.agent.vector_cache_file):
+                os.unlink(st.session_state.agent.vector_cache_file)
+            if os.path.exists(st.session_state.agent.summary_cache_file):
+                os.unlink(st.session_state.agent.summary_cache_file)
             st.rerun()
 
-    # Main chat area
+    if st.session_state.summary:
+        with st.expander("📝 Document Summary", expanded=True):
+            st.markdown(st.session_state.summary)
+
     with st.container(border=True):
         if not st.session_state.messages and not st.session_state.processed_files:
-             st.info("Welcome! Please upload your documents using the sidebar to get started.")
+            st.info("Welcome! Please upload your documents using the sidebar to get started.")
         elif not st.session_state.messages and st.session_state.processed_files:
-             st.info("Documents processed. Ask a question to begin the conversation.")
+            st.info("Documents processed. Ask a question to begin the conversation.")
 
         for message in st.session_state.messages:
             avatar = "👤" if message["role"] == "user" else "✨"
@@ -356,20 +342,15 @@ def main():
                 else:
                     st.markdown(message["content"])
 
-                # Show sources only for document-related queries
                 if "sources" in message and message["sources"] and message.get("is_document_related", True):
                     with st.expander("📚 Show Sources"):
                         for i, source in enumerate(message["sources"]):
                             st.info(f"**Source {i+1} (Page {source['page']}, Score: {source.get('similarity_score', 0):.3f})**\n\n{source['text']}")
 
-                # Show images for document-related queries
                 if "images" in message and message["images"]:
                     st.markdown("**🖼️ Relevant Images:**")
-                    
-                    # Display images in a grid
                     num_images = len(message["images"])
                     cols_per_row = 3
-                    
                     for i in range(0, num_images, cols_per_row):
                         cols = st.columns(min(cols_per_row, num_images - i))
                         for j, img in enumerate(message["images"][i:i+cols_per_row]):
@@ -379,57 +360,65 @@ def main():
                                     caption=f"📄 Page {img['page']} | Score: {img.get('relevance_score', 0):.1f}", 
                                     use_container_width=True
                                 )
-                                # Show OCR text if available
                                 if img.get('ocr_text') and len(img['ocr_text'].strip()) > 10:
                                     with st.expander(f"📝 Text from Page {img['page']}"):
-                                        st.text(img['ocr_text'][:200] + "..." if len(img['ocr_text']) > 200 else img['ocr_text'])
+                                        st.text(img['ocr_text'][:300] + "..." if len(img['ocr_text']) > 300 else img['ocr_text'])
+                                if img.get('tables'):
+                                    with st.expander(f"📊 Tables from Page {img['page']}"):
+                                        for table in img['tables']:
+                                            st.table(table)
 
-    # Chat input
     if query := st.chat_input("Ask a question about your documents..."):
-        st.session_state.messages.append({"role": "user", "content": query})
-        
-        try:
-            if st.session_state.processed_files:
-                response_text, sources = run_async(st.session_state.agent.query_documents(query))
-            else:
-                simple_greetings = ["hello", "hi", "hey", "good morning", "good evening", "thank you", "thanks"]
-                query_lower = query.lower().strip()
-                if any(greeting in query_lower for greeting in simple_greetings):
-                    response_text = "Hello! Please upload your documents using the sidebar so I can help answer questions about them."
-                    sources = []
+        with st.spinner("Generating response..."):
+            st.session_state.messages.append({"role": "user", "content": query})
+            
+            try:
+                if st.session_state.processed_files:
+                    if query.lower().strip() in ["what is this document about", "summarize document", "document summary"]:
+                        if st.session_state.summary:
+                            response_text = st.session_state.summary
+                            sources = []
+                        else:
+                            response_text = "No summary available. Please process documents again."
+                            sources = []
+                    else:
+                        response_text, sources = run_async(st.session_state.agent.query_documents(query))
                 else:
-                    response_text = "I need documents to be uploaded first before I can answer questions about them. Please use the sidebar to upload your PDF documents."
-                    sources = []
-            
-            # Determine if this is a document-related query
-            is_doc_related = is_query_document_related(query, response_text)
-            
-            # Find relevant images for document-related queries
-            images_to_display = []
-            if is_doc_related and st.session_state.images:
-                cited_pages = parse_source_pages(response_text)
-                images_to_display = find_relevant_images_enhanced(
-                    query, cited_pages, st.session_state.images, response_text, sources
-                )
+                    simple_greetings = ["hello", "hi", "hey", "good morning", "good evening", "thank you", "thanks"]
+                    query_lower = query.lower().strip()
+                    if any(greeting in query_lower for greeting in simple_greetings):
+                        response_text = "Hello! Please upload your documents using the sidebar so I can help answer questions about them."
+                        sources = []
+                    else:
+                        response_text = "I need documents to be uploaded first before I can answer questions about them. Please use the sidebar to upload your PDF documents."
+                        sources = []
+                
+                is_doc_related = is_query_document_related(query, response_text)
+                images_to_display = []
+                if is_doc_related and st.session_state.images:
+                    cited_pages = parse_source_pages(response_text)
+                    images_to_display = find_relevant_images_enhanced(
+                        query, cited_pages, st.session_state.images, response_text, sources
+                    )
 
-            assistant_message = {
-                "role": "assistant", 
-                "content": response_text,
-                "sources": sources if is_doc_related else [],
-                "images": images_to_display,
-                "is_document_related": is_doc_related
-            }
+                assistant_message = {
+                    "role": "assistant", 
+                    "content": response_text,
+                    "sources": sources if is_doc_related else [],
+                    "images": images_to_display,
+                    "is_document_related": is_doc_related
+                }
+            except Exception as e:
+                logger.error(f"Critical error processing query: {e}")
+                st.error(f"A critical error occurred: {e}")
+                assistant_message = {
+                    "role": "assistant",
+                    "content": f"I'm sorry, I encountered an error: {e}",
+                    "error": True
+                }
             
-        except Exception as e:
-            st.error(f"A critical error occurred: {e}")
-            assistant_message = {
-                "role": "assistant",
-                "content": f"I'm sorry, I encountered an error: {e}",
-                "error": True
-            }
-            
-        st.session_state.messages.append(assistant_message)
-        st.rerun()
+            st.session_state.messages.append(assistant_message)
+            st.rerun()
 
 if __name__ == "__main__":
     if not os.getenv('GOOGLE_API_KEY'):

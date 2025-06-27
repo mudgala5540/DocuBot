@@ -7,10 +7,13 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import faiss
 from sklearn.metrics.pairwise import cosine_similarity
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class VectorStore:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        """Initialize vector store with sentence transformer model"""
         self.model_name = model_name
         self.model = None
         self.embeddings = None
@@ -22,122 +25,122 @@ class VectorStore:
     def _load_model(self):
         """Load the sentence transformer model"""
         try:
-            # FIX: Explicitly tell the model to use the CPU
-            self.model = SentenceTransformer(self.model_name, device='cpu') 
+            self.model = SentenceTransformer(self.model_name, device='cpu')
+            logger.info(f"Loaded model: {self.model_name}")
         except Exception as e:
-            print(f"Error loading model {self.model_name}: {e}")
-            # FIX: Fallback model also needs the device specified
+            logger.error(f"Error loading model {self.model_name}: {e}")
             self.model = SentenceTransformer("all-MiniLM-L12-v2", device='cpu')
+            logger.info("Loaded fallback model: all-MiniLM-L12-v2")
     
     async def add_documents(self, documents: List[Dict[str, Any]]):
         """Add documents to vector store"""
         if not documents:
+            logger.warning("No documents provided to add to vector store")
             return
         
         self.documents = documents
-        
-        # Extract text for embedding
         texts = [doc['text'] for doc in documents]
         
-        # Generate embeddings
-        # FIX: Use the current running loop instead of get_event_loop()
-        loop = asyncio.get_running_loop()
-        embeddings = await loop.run_in_executor(
-            self.executor,
-            lambda: self.model.encode(texts, show_progress_bar=True)
-        )
-        
-        self.embeddings = np.array(embeddings)
-        
-        # Create FAISS index for efficient similarity search
-        dimension = self.embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(dimension)  # Inner product (cosine similarity)
-        
-        # Normalize embeddings for cosine similarity
-        normalized_embeddings = self.embeddings / np.linalg.norm(self.embeddings, axis=1, keepdims=True)
-        self.index.add(normalized_embeddings.astype('float32'))
+        try:
+            loop = asyncio.get_running_loop()
+            embeddings = await loop.run_in_executor(
+                self.executor,
+                lambda: self.model.encode(texts, show_progress_bar=True, batch_size=32)
+            )
+            self.embeddings = np.array(embeddings)
+            dimension = self.embeddings.shape[1]
+            self.index = faiss.IndexFlatIP(dimension)
+            normalized_embeddings = self.embeddings / np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+            self.index.add(normalized_embeddings.astype('float32'))
+            logger.info(f"Added {len(documents)} documents to vector store")
+        except Exception as e:
+            logger.error(f"Error adding documents to vector store: {e}")
+            self.documents = []
+            self.embeddings = None
+            self.index = None
     
     async def similarity_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
         """Search for similar documents"""
+        if not query.strip():
+            logger.warning("Empty query provided for similarity search")
+            return []
         if not self.documents or self.index is None:
+            logger.warning("No documents or index available for similarity search")
             return []
         
-        # Generate query embedding
-        # FIX: Use the current running loop instead of get_event_loop()
-        loop = asyncio.get_running_loop()
-        query_embedding = await loop.run_in_executor(
-            self.executor,
-            self.model.encode,
-            [query]
-        )
-        
-        # Normalize query embedding
-        query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
-        
-        # Search using FAISS
-        scores, indices = self.index.search(query_embedding.astype('float32'), k)
-        
-        # Prepare results
-        results = []
-        for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-            if idx < len(self.documents):
-                doc = self.documents[idx].copy()
-                doc['similarity_score'] = float(score)
-                doc['rank'] = i + 1
-                results.append(doc)
-        
-        return results
+        try:
+            loop = asyncio.get_running_loop()
+            query_embedding = await loop.run_in_executor(
+                self.executor,
+                self.model.encode,
+                [query]
+            )
+            query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
+            scores, indices = self.index.search(query_embedding.astype('float32'), k)
+            
+            results = []
+            for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
+                if idx < len(self.documents):
+                    doc = self.documents[idx].copy()
+                    doc['similarity_score'] = float(score)
+                    doc['rank'] = i + 1
+                    results.append(doc)
+            
+            logger.info(f"Similarity search returned {len(results)} results for query: {query}")
+            return results
+        except Exception as e:
+            logger.error(f"Error in similarity search: {e}")
+            return []
     
     async def hybrid_search(self, query: str, k: int = 5, alpha: float = 0.7) -> List[Dict[str, Any]]:
         """Hybrid search combining semantic and keyword matching"""
+        if not query.strip():
+            logger.warning("Empty query provided for hybrid search")
+            return []
         if not self.documents:
+            logger.warning("No documents available for hybrid search")
             return []
         
-        # Semantic search
-        semantic_results = await self.similarity_search(query, k * 2)
-        
-        # Keyword search
-        keyword_results = self._keyword_search(query, k * 2)
-        
-        # Combine results with weighted scoring
-        combined_scores = {}
-        
-        # Add semantic scores
-        for result in semantic_results:
-            doc_id = result['chunk_id']
-            combined_scores[doc_id] = {
-                'doc': result,
-                'semantic_score': result['similarity_score'],
-                'keyword_score': 0
-            }
-        
-        # Add keyword scores
-        for result in keyword_results:
-            doc_id = result['chunk_id']
-            if doc_id in combined_scores:
-                combined_scores[doc_id]['keyword_score'] = result['keyword_score']
-            else:
+        try:
+            semantic_results = await self.similarity_search(query, k * 2)
+            keyword_results = self._keyword_search(query, k * 2)
+            
+            combined_scores = {}
+            for result in semantic_results:
+                doc_id = result['chunk_id']
                 combined_scores[doc_id] = {
                     'doc': result,
-                    'semantic_score': 0,
-                    'keyword_score': result['keyword_score']
+                    'semantic_score': result['similarity_score'],
+                    'keyword_score': 0
                 }
-        
-        # Calculate hybrid scores
-        final_results = []
-        for doc_id, scores in combined_scores.items():
-            hybrid_score = (alpha * scores['semantic_score'] + 
-                          (1 - alpha) * scores['keyword_score'])
             
-            doc = scores['doc'].copy()
-            doc['hybrid_score'] = hybrid_score
-            doc['semantic_score'] = scores['semantic_score']
-            doc['keyword_score'] = scores['keyword_score']
-            final_results.append(doc)
-        
-        # Sort by hybrid score and return top k
-        final_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
-        return final_results[:k]
+            for result in keyword_results:
+                doc_id = result['chunk_id']
+                if doc_id in combined_scores:
+                    combined_scores[doc_id]['keyword_score'] = result['keyword_score']
+                else:
+                    combined_scores[doc_id] = {
+                        'doc': result,
+                        'semantic_score': 0,
+                        'keyword_score': result['keyword_score']
+                    }
+            
+            final_results = []
+            for doc_id, scores in combined_scores.items():
+                hybrid_score = (alpha * scores['semantic_score'] + 
+                              (1 - alpha) * scores['keyword_score'])
+                doc = scores['doc'].copy()
+                doc['hybrid_score'] = hybrid_score
+                doc['semantic_score'] = scores['semantic_score']
+                doc['keyword_score'] = scores['keyword_score']
+                final_results.append(doc)
+            
+            final_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
+            logger.info(f"Hybrid search returned {len(final_results[:k])} results for query: {query}")
+            return final_results[:k]
+        except Exception as e:
+            logger.error(f"Error in hybrid search: {e}")
+            return []
     
     def _keyword_search(self, query: str, k: int) -> List[Dict[str, Any]]:
         """Simple keyword-based search"""
@@ -146,8 +149,6 @@ class VectorStore:
         
         for doc in self.documents:
             text_words = set(doc['text'].lower().split())
-            
-            # Calculate keyword overlap score
             overlap = len(query_words.intersection(text_words))
             if overlap > 0:
                 score = overlap / len(query_words)
@@ -155,45 +156,42 @@ class VectorStore:
                 doc_copy['keyword_score'] = score
                 results.append(doc_copy)
         
-        # Sort by keyword score
         results.sort(key=lambda x: x['keyword_score'], reverse=True)
         return results[:k]
     
     def save_index(self, filepath: str):
         """Save vector store to disk"""
-        data = {
-            'documents': self.documents,
-            'embeddings': self.embeddings,
-            'model_name': self.model_name
-        }
-        
-        with open(filepath, 'wb') as f:
-            pickle.dump(data, f)
-        
-        # Save FAISS index separately
-        if self.index is not None:
-            faiss.write_index(self.index, filepath + '.faiss')
+        try:
+            data = {
+                'documents': self.documents,
+                'embeddings': self.embeddings,
+                'model_name': self.model_name
+            }
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            if self.index is not None:
+                faiss.write_index(self.index, filepath + '.faiss')
+            logger.info(f"Saved vector store to {filepath}")
+        except Exception as e:
+            logger.error(f"Error saving index: {e}")
     
     def load_index(self, filepath: str):
         """Load vector store from disk"""
-        if not os.path.exists(filepath):
-            return False
-        
         try:
+            if not os.path.exists(filepath):
+                logger.warning(f"Index file {filepath} not found")
+                return False
             with open(filepath, 'rb') as f:
                 data = pickle.load(f)
-            
             self.documents = data['documents']
             self.embeddings = data['embeddings']
-            
-            # Load FAISS index
             faiss_path = filepath + '.faiss'
             if os.path.exists(faiss_path):
                 self.index = faiss.read_index(faiss_path)
-            
+            logger.info(f"Loaded vector store from {filepath}")
             return True
         except Exception as e:
-            print(f"Error loading index: {e}")
+            logger.error(f"Error loading index: {e}")
             return False
     
     def get_stats(self) -> Dict[str, Any]:
